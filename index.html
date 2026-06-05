@@ -92,37 +92,12 @@ const getProjectIdentity = (project) => project?.id || project?.title || ''
 
 const getProjectUpdatedAt = (project) => {
   const candidates = [
-    project?.statusUpdatedAt,
     project?.updatedAt,
     project?.completedAt,
     project?.createdAt,
     ...(project?.storedFiles || []).map((file) => file?.revisionRequestedAt || 0),
   ].filter(Boolean)
   return candidates.length ? Math.max(...candidates.map((value) => Number(value) || 0)) : 0
-}
-
-const mergeProjectStatusSafely = (existing, incoming) => {
-  if (!existing) return incoming
-  if (!incoming) return existing
-
-  const existingStatusTime = Number(existing.statusUpdatedAt || existing.completedAt || existing.updatedAt || 0)
-  const incomingStatusTime = Number(incoming.statusUpdatedAt || incoming.completedAt || incoming.updatedAt || 0)
-
-  if (existingStatusTime > incomingStatusTime) {
-    return {
-      ...incoming,
-      status: existing.status,
-      statusUpdatedAt: existing.statusUpdatedAt,
-      completedAt: existing.completedAt,
-      revisionBeforeFiles: existing.revisionBeforeFiles,
-      storedFiles: existing.storedFiles,
-      files: existing.files,
-      docs: existing.docs,
-      updatedAt: Math.max(Number(existing.updatedAt || 0), Number(incoming.updatedAt || 0)),
-    }
-  }
-
-  return incoming
 }
 
 const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = [], deletedProjects = {}) => {
@@ -157,9 +132,7 @@ const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = [], dele
     const existingTime = getProjectUpdatedAt(existing)
 
     if (incomingTime >= existingTime) {
-      map.set(key, mergeProjectStatusSafely(existing, project))
-    } else {
-      map.set(key, mergeProjectStatusSafely(project, existing))
+      map.set(key, project)
     }
   })
 
@@ -374,15 +347,7 @@ const loadStorage = (key, fallback) => {
 
 const saveStorage = (key, value) => {
   try {
-    let nextValue = value
-
-    if (key === STORAGE_KEYS.projects && Array.isArray(value)) {
-      const existingProjects = loadStorage(STORAGE_KEYS.projects, [])
-      const deletedProjects = loadStorage(STORAGE_KEYS.deletedProjects, {}) || {}
-      nextValue = mergeProjectsByFreshness(existingProjects, value, deletedProjects)
-    }
-
-    window.localStorage.setItem(key, JSON.stringify(nextValue))
+    window.localStorage.setItem(key, JSON.stringify(value))
     if (Date.now() > suppressRemoteSaveUntil) queueWorkspaceSave()
   } catch {
     // 저장공간 부족 시 앱 중단 방지
@@ -1243,7 +1208,7 @@ function DesignReviewPlatform() {
       return
     }
 
-    const newProject = { id: `${Date.now()}-${projectForm.title}`, createdAt: Date.now(), title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, status: '컨펌대기', statusUpdatedAt: Date.now(), updatedAt: Date.now(), deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: newFiles, files: imageFiles.length, docs: docFiles.length }
+    const newProject = { id: `${Date.now()}-${projectForm.title}`, createdAt: Date.now(), title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, status: '컨펌대기', deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: newFiles, files: imageFiles.length, docs: docFiles.length }
     clearProjectDeletionRecord(newProject)
     clearProjectDeletionRecord(newProject)
     const nextProjects = [newProject, ...projects].slice(0, 50)
@@ -1284,7 +1249,7 @@ function DesignReviewPlatform() {
     const baseTitle = quickUploadDraft.title || getBaseFileName(images[0]?.name)
     const duplicatedCount = projects.filter((project) => project.title === baseTitle || project.title.startsWith(`${baseTitle} (`)).length
     const title = duplicatedCount ? `${baseTitle} (${duplicatedCount + 1})` : baseTitle
-    const newProject = { id: `${Date.now()}-${title}`, createdAt: Date.now(), title, owner: currentUser || teamMembers[0] || '작업자', reviewer: quickUploadReviewer || adminMembers[0] || teamMembers[0] || '컨펌자', status: '컨펌대기', statusUpdatedAt: Date.now(), updatedAt: Date.now(), deadline: quickUploadTodayDeadline ? todayString() : '', description: '', mailLink: '', storedFiles: quickUploadDraft.files, files: images.length, docs: docs.length }
+    const newProject = { id: `${Date.now()}-${title}`, createdAt: Date.now(), title, owner: currentUser || teamMembers[0] || '작업자', reviewer: quickUploadReviewer || adminMembers[0] || teamMembers[0] || '컨펌자', status: '컨펌대기', deadline: quickUploadTodayDeadline ? todayString() : '', description: '', mailLink: '', storedFiles: quickUploadDraft.files, files: images.length, docs: docs.length }
     setProjects((prev) => [newProject, ...prev].slice(0, 50))
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
@@ -1322,18 +1287,16 @@ function DesignReviewPlatform() {
     })
     const requestedFiles = nextFiles.filter((file) => !file.isDocument && file.revisionRequested)
     const nextStatus = requestedFiles.length ? '수정요청' : '컨펌대기'
-    const statusChangedAt = Date.now()
 
     const nextProjects = projects.map((project) => project.title === selectedProjectTitle
       ? {
         ...project,
         status: nextStatus,
-        statusUpdatedAt: statusChangedAt,
         revisionBeforeFiles: requestedFiles,
         storedFiles: nextFiles,
         files: nextFiles.filter((file) => !file.isDocument).length,
         docs: nextFiles.filter((file) => file.isDocument).length,
-        updatedAt: statusChangedAt,
+        updatedAt: Date.now(),
       }
       : project
     )
@@ -1373,10 +1336,7 @@ function DesignReviewPlatform() {
       return before ? { ...file, beforeFile: before, beforeUrl: before.url, beforeName: before.name } : file
     })
     const nextFiles = [...nextImages, ...docs]
-    const statusChangedAt = Date.now()
-    const nextProjects = projects.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', statusUpdatedAt: statusChangedAt, revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length, updatedAt: statusChangedAt } : project)
-    setProjects(nextProjects)
-    saveWorkspaceToSupabase({ ...getLocalWorkspaceState(), [STORAGE_KEYS.projects]: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length } : project))
     setSelectedProjectTitle(targetProject.title)
     setSelectedCardTitle(targetProject.title)
     setUploadedFiles(nextFiles)
@@ -1388,8 +1348,7 @@ function DesignReviewPlatform() {
 
   const completeApproval = () => {
     if (!selectedProjectTitle) return
-    const statusChangedAt = Date.now()
-    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', statusUpdatedAt: statusChangedAt, completedAt: statusChangedAt, updatedAt: statusChangedAt } : project)
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now(), updatedAt: Date.now() } : project)
     commitProjectsWithNotification(nextProjects, '컨펌완료', selectedProjectTitle)
     setNotice(`${selectedProjectTitle} 프로젝트가 컨펌완료로 변경되었습니다.`)
   }
