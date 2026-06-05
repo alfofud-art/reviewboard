@@ -409,7 +409,11 @@ function DesignReviewPlatform() {
 
 
   useEffect(() => {
+    let isMounted = true
+    let lastRemoteStateText = ''
+
     const refreshFromLocalStorage = () => {
+      if (!isMounted) return
       setTeamMembers(loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
       setTeamMemberColors(loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
       setProjects(normalizeProjects(loadStorage(STORAGE_KEYS.projects, DEFAULT_PROJECTS)))
@@ -420,19 +424,48 @@ function DesignReviewPlatform() {
       setNotifications(loadStorage(STORAGE_KEYS.notifications, []))
     }
 
+    const pullWorkspaceFromSupabase = async (showNotice = false) => {
+      if (!supabaseClient) return
+      try {
+        const { data, error } = await supabaseClient
+          .from('reviewboard_workspace_state')
+          .select('state, updated_at')
+          .eq('id', WORKSPACE_ID)
+          .maybeSingle()
+
+        if (error || !data?.state) return
+
+        const nextStateText = JSON.stringify(data.state)
+        if (nextStateText === lastRemoteStateText) return
+
+        lastRemoteStateText = nextStateText
+        applyRemoteWorkspaceState(data.state)
+        refreshFromLocalStorage()
+        if (showNotice) setNotice('다른 사용자의 변경사항이 반영되었습니다.')
+      } catch (error) {
+        console.warn('Supabase 실시간 동기화 확인 실패:', error)
+      }
+    }
+
     const hydrateSharedWorkspace = async () => {
-      const loaded = await loadWorkspaceFromSupabase()
-      if (loaded) refreshFromLocalStorage()
+      await pullWorkspaceFromSupabase(false)
     }
 
     hydrateSharedWorkspace()
 
     const channel = subscribeWorkspaceRealtime(() => {
-      refreshFromLocalStorage()
-      setNotice('다른 사용자의 변경사항이 실시간 반영되었습니다.')
+      pullWorkspaceFromSupabase(true)
     })
 
+    // Realtime 이벤트가 회사망/브라우저 정책 때문에 늦거나 막히는 경우를 대비한 안전장치
+    // 1.5초마다 Supabase 최신 상태를 확인해서 카드/상태를 자동 동기화한다.
+    const syncInterval = window.setInterval(() => {
+      pullWorkspaceFromSupabase(false)
+    }, 1500)
+
     return () => {
+      isMounted = false
+      window.clearInterval(syncInterval)
       if (channel && supabaseClient) supabaseClient.removeChannel(channel)
     }
   }, [])
