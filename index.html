@@ -59,6 +59,9 @@ const SESSION_LOCAL_ONLY_KEYS = new Set([
 
 let remoteSaveTimer = null
 let remoteSavePayload = null
+let isWorkspaceSaving = false
+let lastLocalWorkspaceChangeAt = 0
+let lastRemoteWorkspaceAppliedAt = 0
 
 const getLocalWorkspaceState = () => {
   const state = {}
@@ -88,26 +91,34 @@ const applyRemoteWorkspaceState = (state) => {
 
 const saveWorkspaceToSupabase = async (state) => {
   if (!supabaseClient) return
+  isWorkspaceSaving = true
   try {
+    const savedAt = Date.now()
     await supabaseClient
       .from('reviewboard_workspace_state')
       .upsert({
         id: WORKSPACE_ID,
         state,
-        updated_at: new Date().toISOString(),
+        updated_at: new Date(savedAt).toISOString(),
       })
+    lastLocalWorkspaceChangeAt = savedAt
   } catch (error) {
     console.warn('Supabase 저장 실패:', error)
+  } finally {
+    window.setTimeout(() => {
+      isWorkspaceSaving = false
+    }, 1200)
   }
 }
 
 const queueWorkspaceSave = () => {
   if (!supabaseClient) return
+  lastLocalWorkspaceChangeAt = Date.now()
   remoteSavePayload = getLocalWorkspaceState()
   window.clearTimeout(remoteSaveTimer)
   remoteSaveTimer = window.setTimeout(() => {
     saveWorkspaceToSupabase(remoteSavePayload)
-  }, 700)
+  }, 250)
 }
 
 const loadWorkspaceFromSupabase = async () => {
@@ -426,6 +437,11 @@ function DesignReviewPlatform() {
 
     const pullWorkspaceFromSupabase = async (showNotice = false) => {
       if (!supabaseClient) return
+
+      // 내가 방금 카드를 만들거나 상태를 바꿔서 Supabase 저장 중인 순간에는
+      // 예전 원격 데이터를 읽어와서 내 변경사항을 덮어쓰지 않도록 막는다.
+      if (isWorkspaceSaving || Date.now() - lastLocalWorkspaceChangeAt < 1800) return
+
       try {
         const { data, error } = await supabaseClient
           .from('reviewboard_workspace_state')
@@ -435,10 +451,16 @@ function DesignReviewPlatform() {
 
         if (error || !data?.state) return
 
+        const remoteUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0
+
+        // 원격 데이터가 내가 마지막으로 수정한 시간보다 오래된 데이터면 적용하지 않는다.
+        if (remoteUpdatedAt && remoteUpdatedAt < lastLocalWorkspaceChangeAt) return
+
         const nextStateText = JSON.stringify(data.state)
         if (nextStateText === lastRemoteStateText) return
 
         lastRemoteStateText = nextStateText
+        lastRemoteWorkspaceAppliedAt = Date.now()
         applyRemoteWorkspaceState(data.state)
         refreshFromLocalStorage()
         if (showNotice) setNotice('다른 사용자의 변경사항이 반영되었습니다.')
