@@ -52,22 +52,21 @@ const supabaseClient = isSupabaseConfigured() && window.supabase
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null
 
-const SESSION_LOCAL_ONLY_KEYS = new Set([
-  STORAGE_KEYS.currentUser,
-  STORAGE_KEYS.adminAuthenticatedUser,
-])
-
 let remoteSaveTimer = null
 let remoteSavePayload = null
-let isWorkspaceSaving = false
-let lastLocalWorkspaceChangeAt = 0
-let lastRemoteWorkspaceAppliedAt = 0
 let isApplyingRemoteWorkspace = false
+let hasLoadedRemoteWorkspace = false
 
 const getLocalWorkspaceState = () => {
   const state = {}
+  const browserOnlyKeys = new Set([
+    STORAGE_KEYS.currentUser,
+    STORAGE_KEYS.adminAuthenticatedUser,
+  ])
+
   Object.values(STORAGE_KEYS).forEach((key) => {
-    if (SESSION_LOCAL_ONLY_KEYS.has(key)) return
+    if (browserOnlyKeys.has(key)) return
+
     try {
       const value = window.localStorage.getItem(key)
       if (value !== null) state[key] = JSON.parse(value)
@@ -80,46 +79,57 @@ const getLocalWorkspaceState = () => {
 
 const applyRemoteWorkspaceState = (state) => {
   if (!state || typeof state !== 'object') return
+
+  const browserOnlyKeys = new Set([
+    STORAGE_KEYS.currentUser,
+    STORAGE_KEYS.adminAuthenticatedUser,
+  ])
+
+  isApplyingRemoteWorkspace = true
+
   Object.entries(state).forEach(([key, value]) => {
-    if (SESSION_LOCAL_ONLY_KEYS.has(key)) return
+    if (browserOnlyKeys.has(key)) return
+
     try {
       window.localStorage.setItem(key, JSON.stringify(value))
     } catch {
       // 저장공간 부족 시 무시
     }
   })
+
+  window.setTimeout(() => {
+    isApplyingRemoteWorkspace = false
+  }, 800)
 }
 
 const saveWorkspaceToSupabase = async (state) => {
   if (!supabaseClient) return
-  isWorkspaceSaving = true
   try {
-    const savedAt = Date.now()
     await supabaseClient
       .from('reviewboard_workspace_state')
       .upsert({
         id: WORKSPACE_ID,
         state,
-        updated_at: new Date(savedAt).toISOString(),
+        updated_at: new Date().toISOString(),
       })
-    lastLocalWorkspaceChangeAt = savedAt
   } catch (error) {
     console.warn('Supabase 저장 실패:', error)
-  } finally {
-    window.setTimeout(() => {
-      isWorkspaceSaving = false
-    }, 1200)
   }
 }
 
 const queueWorkspaceSave = () => {
   if (!supabaseClient) return
-  lastLocalWorkspaceChangeAt = Date.now()
+  if (isApplyingRemoteWorkspace) return
+
+  // 첫 접속 직후 React useEffect가 로컬 기본값을 먼저 저장해서
+  // Supabase의 기존 카드를 덮어쓰는 문제를 막는다.
+  if (!hasLoadedRemoteWorkspace) return
+
   remoteSavePayload = getLocalWorkspaceState()
   window.clearTimeout(remoteSaveTimer)
   remoteSaveTimer = window.setTimeout(() => {
     saveWorkspaceToSupabase(remoteSavePayload)
-  }, 250)
+  }, 700)
 }
 
 const loadWorkspaceFromSupabase = async () => {
@@ -138,9 +148,11 @@ const loadWorkspaceFromSupabase = async () => {
 
     if (data?.state) {
       applyRemoteWorkspaceState(data.state)
+      hasLoadedRemoteWorkspace = true
       return true
     }
 
+    hasLoadedRemoteWorkspace = true
     await saveWorkspaceToSupabase(getLocalWorkspaceState())
     return false
   } catch (error) {
@@ -154,7 +166,7 @@ const subscribeWorkspaceRealtime = (onRemoteChange) => {
   if (!supabaseClient) return null
 
   return supabaseClient
-    .channel('reviewboard-workspace-realtime')
+    .channel('reviewboard-workspace-state')
     .on(
       'postgres_changes',
       {
@@ -171,7 +183,9 @@ const subscribeWorkspaceRealtime = (onRemoteChange) => {
         onRemoteChange?.()
       }
     )
-    .subscribe()
+    .subscribe((status) => {
+      console.log('Supabase Realtime 상태:', status)
+    })
 }
 
 const DEFAULT_MEMBERS = ['이지혜', '김OO 과장', '박OO', '최OO 팀장', '엄OO 과장', '정OO']
@@ -268,11 +282,8 @@ const loadStorage = (key, fallback) => {
 
 const saveStorage = (key, value) => {
   try {
-    const serialized = JSON.stringify(value)
-    const previous = window.localStorage.getItem(key)
-    if (previous === serialized) return
-    window.localStorage.setItem(key, serialized)
-    if (!SESSION_LOCAL_ONLY_KEYS.has(key)) queueWorkspaceSave()
+    window.localStorage.setItem(key, JSON.stringify(value))
+    if (!isApplyingRemoteWorkspace) queueWorkspaceSave()
   } catch {
     // 저장공간 부족 시 앱 중단 방지
   }
@@ -421,11 +432,7 @@ function DesignReviewPlatform() {
 
 
   useEffect(() => {
-    let isMounted = true
-    let lastRemoteUpdatedAt = 0
-
-    const refreshFromLocalStorage = () => {
-      if (!isMounted) return
+    const refreshSharedWorkspace = () => {
       setTeamMembers(loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
       setTeamMemberColors(loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
       setProjects(normalizeProjects(loadStorage(STORAGE_KEYS.projects, DEFAULT_PROJECTS)))
@@ -436,55 +443,19 @@ function DesignReviewPlatform() {
       setNotifications(loadStorage(STORAGE_KEYS.notifications, []))
     }
 
-    const pullWorkspaceFromSupabase = async (showNotice = false) => {
-      if (!supabaseClient) return
-
-      // 내가 저장 중일 때는 원격값을 당겨오지 않는다.
-      if (isWorkspaceSaving) return
-
-      try {
-        const { data, error } = await supabaseClient
-          .from('reviewboard_workspace_state')
-          .select('state, updated_at')
-          .eq('id', WORKSPACE_ID)
-          .maybeSingle()
-
-        if (error || !data?.state) return
-
-        const remoteUpdatedAt = data.updated_at ? new Date(data.updated_at).getTime() : 0
-        if (remoteUpdatedAt && remoteUpdatedAt <= lastRemoteUpdatedAt) return
-
-        // 내가 방금 로컬에서 수정한 내용보다 오래된 원격값이면 적용하지 않는다.
-        if (remoteUpdatedAt && remoteUpdatedAt < lastLocalWorkspaceChangeAt) return
-
-        lastRemoteUpdatedAt = remoteUpdatedAt || Date.now()
-
-        applyRemoteWorkspaceState(data.state)
-        refreshFromLocalStorage()
-        if (showNotice) setNotice('다른 사용자의 변경사항이 반영되었습니다.')
-      } catch (error) {
-        console.warn('Supabase 동기화 확인 실패:', error)
-      }
-    }
-
     const hydrateSharedWorkspace = async () => {
-      await pullWorkspaceFromSupabase(false)
+      const loaded = await loadWorkspaceFromSupabase()
+      if (loaded) refreshSharedWorkspace()
+      else hasLoadedRemoteWorkspace = true
     }
 
     hydrateSharedWorkspace()
 
     const channel = subscribeWorkspaceRealtime(() => {
-      pullWorkspaceFromSupabase(true)
+      refreshSharedWorkspace()
     })
 
-    // Realtime 보조용. 단, 원격 적용 중에는 saveStorage가 재저장하지 않도록 막아둔다.
-    const syncInterval = window.setInterval(() => {
-      pullWorkspaceFromSupabase(false)
-    }, 2500)
-
     return () => {
-      isMounted = false
-      window.clearInterval(syncInterval)
       if (channel && supabaseClient) supabaseClient.removeChannel(channel)
     }
   }, [])
@@ -510,29 +481,6 @@ function DesignReviewPlatform() {
   const activeImageName = currentFile?.beforeUrl && activeCompareSide === 'before' ? currentFile.beforeName || 'before' : currentFile?.name
   const currentDrawings = drawings[activeImageKey] || []
   const currentComments = comments[activeImageKey] || []
-
-  const saveSharedStateNow = (overrides = {}) => {
-    const sharedState = {
-      [STORAGE_KEYS.teamMembers]: overrides.teamMembers ?? teamMembers,
-      [STORAGE_KEYS.teamMemberColors]: overrides.teamMemberColors ?? teamMemberColors,
-      [STORAGE_KEYS.projects]: overrides.projects ?? projects,
-      [STORAGE_KEYS.drawings]: overrides.drawings ?? drawings,
-      [STORAGE_KEYS.comments]: overrides.comments ?? comments,
-      [STORAGE_KEYS.viewStates]: overrides.viewStates ?? viewStates,
-      [STORAGE_KEYS.revisionCompletedFiles]: overrides.revisionCompletedFiles ?? revisionCompletedFiles,
-      [STORAGE_KEYS.notifications]: overrides.notifications ?? notifications,
-    }
-
-    Object.entries(sharedState).forEach(([key, value]) => {
-      try {
-        window.localStorage.setItem(key, JSON.stringify(value))
-      } catch {}
-    })
-
-    lastLocalWorkspaceChangeAt = Date.now()
-    saveWorkspaceToSupabase(sharedState)
-  }
-
 
   const filteredProjects = useMemo(() => {
     let list = projects
@@ -1031,15 +979,13 @@ function DesignReviewPlatform() {
 
     if (editingProjectTitle) {
       let nextSelectedFiles = uploadedFiles
-      const nextProjects = projects.map((project) => {
+      setProjects((prev) => prev.map((project) => {
         if (project.title !== editingProjectTitle) return project
         const existingFiles = project.storedFiles || []
         const mergedFiles = newFiles.length ? [...existingFiles, ...newFiles] : existingFiles
         nextSelectedFiles = mergedFiles
         return { ...project, title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: mergedFiles, files: mergedFiles.filter((file) => !file.isDocument).length, docs: mergedFiles.filter((file) => file.isDocument).length }
-      })
-      setProjects(nextProjects)
-      saveSharedStateNow({ projects: nextProjects })
+      }))
       setSelectedProjectTitle(projectForm.title.trim())
       setUploadedFiles(nextSelectedFiles)
       setIsProjectModalOpen(false)
@@ -1048,9 +994,7 @@ function DesignReviewPlatform() {
     }
 
     const newProject = { id: `${Date.now()}-${projectForm.title}`, createdAt: Date.now(), title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, status: '컨펌대기', deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: newFiles, files: imageFiles.length, docs: docFiles.length }
-    const nextProjects = [newProject, ...projects].slice(0, 50)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => [newProject, ...prev].slice(0, 50))
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setUploadedFiles(newFiles)
@@ -1087,9 +1031,7 @@ function DesignReviewPlatform() {
     const duplicatedCount = projects.filter((project) => project.title === baseTitle || project.title.startsWith(`${baseTitle} (`)).length
     const title = duplicatedCount ? `${baseTitle} (${duplicatedCount + 1})` : baseTitle
     const newProject = { id: `${Date.now()}-${title}`, createdAt: Date.now(), title, owner: currentUser || teamMembers[0] || '작업자', reviewer: quickUploadReviewer || adminMembers[0] || teamMembers[0] || '컨펌자', status: '컨펌대기', deadline: quickUploadTodayDeadline ? todayString() : '', description: '', mailLink: '', storedFiles: quickUploadDraft.files, files: images.length, docs: docs.length }
-    const nextProjects = [newProject, ...projects].slice(0, 50)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => [newProject, ...prev].slice(0, 50))
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setQuickUploadDraft(null)
@@ -1126,9 +1068,7 @@ function DesignReviewPlatform() {
     })
     const requestedFiles = nextFiles.filter((file) => !file.isDocument && file.revisionRequested)
     const nextStatus = requestedFiles.length ? '수정요청' : '컨펌대기'
-    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: nextStatus, revisionBeforeFiles: requestedFiles, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: nextStatus, revisionBeforeFiles: requestedFiles, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
     setUploadedFiles(nextFiles)
     setCurrentImageIndex(0)
     addNotification(isAlreadyRequested ? '수정요청취소' : '수정요청', selectedProjectTitle)
@@ -1157,9 +1097,7 @@ function DesignReviewPlatform() {
       return before ? { ...file, beforeFile: before, beforeUrl: before.url, beforeName: before.name } : file
     })
     const nextFiles = [...nextImages, ...docs]
-    const nextProjects = projects.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length } : project)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length } : project))
     setSelectedProjectTitle(targetProject.title)
     setSelectedCardTitle(targetProject.title)
     setUploadedFiles(nextFiles)
@@ -1171,9 +1109,7 @@ function DesignReviewPlatform() {
 
   const completeApproval = () => {
     if (!selectedProjectTitle) return
-    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now() } : project)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now() } : project))
     addNotification('컨펌완료', selectedProjectTitle)
     setNotice(`${selectedProjectTitle} 프로젝트가 컨펌완료로 변경되었습니다.`)
   }
@@ -1195,9 +1131,7 @@ function DesignReviewPlatform() {
     if (!currentFile) return
     const nextFiles = uploadedFiles.filter((file) => file.id !== currentFile.id)
     setUploadedFiles(nextFiles)
-    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
     setCurrentImageIndex(0)
     setNotice('이미지가 삭제되었습니다.')
   }
@@ -1380,9 +1314,7 @@ function DesignReviewPlatform() {
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
     setUploadedFiles(nextFiles)
-    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
-    setProjects(nextProjects)
-    saveSharedStateNow({ projects: nextProjects })
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
   }
 
   const authenticateAdmin = () => {
