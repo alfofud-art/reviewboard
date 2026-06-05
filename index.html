@@ -269,7 +269,7 @@ const todayString = () => new Date().toISOString().slice(0, 10)
 const TEST_CASES = [
   { name: 'create project', expected: '프로젝트가 생성된다.' },
   { name: 'edit project', expected: '수정 아이콘 클릭 시 수정 팝업이 열린다.' },
-  { name: 'admin authentication', expected: '관리자 인증 후 컨펌 버튼이 표시된다.' },
+  { name: 'admin authentication', expected: '사용자 인증 후 컨펌 버튼이 표시된다.' },
   { name: 'revision complete toggles per image', expected: '수정없음 버튼은 현재 이미지에만 적용된다.' },
   { name: 'request revision toggle', expected: '수정요청 버튼 재클릭 시 수정요청이 취소되고 컨펌대기로 복귀한다.' },
   { name: 'request revision clears complete', expected: '수정요청 시 해당 이미지의 수정없음 상태가 자동 해제된다.' },
@@ -541,15 +541,40 @@ function DesignReviewPlatform() {
   }
 
   const requestDesktopNotificationPermission = async () => {
-    if (!('Notification' in window)) return 'unsupported'
-    if (Notification.permission === 'default') {
-      try {
-        return await Notification.requestPermission()
-      } catch {
-        return Notification.permission
-      }
+    if (!('Notification' in window)) {
+      setNotice('이 브라우저는 윈도우 알림을 지원하지 않습니다.')
+      return 'unsupported'
     }
-    return Notification.permission
+
+    if (Notification.permission === 'granted') {
+      setNotice('윈도우 알림이 이미 허용되어 있습니다.')
+      return 'granted'
+    }
+
+    if (Notification.permission === 'denied') {
+      setNotice('브라우저 알림이 차단되어 있습니다. 주소창 왼쪽 사이트 설정에서 알림을 허용해주세요.')
+      return 'denied'
+    }
+
+    try {
+      const permission = await Notification.requestPermission()
+      if (permission === 'granted') {
+        const testNotice = new Notification('디자인 검토 위원회', {
+          body: '윈도우 알림이 연결되었습니다.',
+          tag: 'reviewboard-permission-test',
+          requireInteraction: false,
+          silent: false,
+        })
+        window.setTimeout(() => testNotice.close(), 3500)
+        setNotice('윈도우 알림이 허용되었습니다.')
+      } else {
+        setNotice('윈도우 알림 권한이 허용되지 않았습니다.')
+      }
+      return permission
+    } catch {
+      setNotice('윈도우 알림 권한 요청 중 오류가 발생했습니다.')
+      return Notification.permission
+    }
   }
 
   const showDesktopNotification = (notice) => {
@@ -559,18 +584,22 @@ function DesignReviewPlatform() {
 
       const browserNotice = new Notification(`디자인 검토 위원회 · ${notice.title}`, {
         body: notice.message,
-        icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"%3E%3Crect width="128" height="128" rx="28" fill="%234F7CFF"/%3E%3Ctext x="64" y="78" font-size="54" text-anchor="middle" fill="white"%3E%F0%9F%94%94%3C/text%3E%3C/svg%3E',
         tag: `reviewboard-${notice.id}`,
+        requireInteraction: false,
+        silent: false,
       })
+
+      window.setTimeout(() => browserNotice.close(), 7000)
 
       browserNotice.onclick = () => {
         window.focus()
-        const target = projects.find((project) => project.title === notice.project)
+        const latestProjects = normalizeProjects(loadStorage(STORAGE_KEYS.projects, projects))
+        const target = latestProjects.find((project) => project.title === notice.project)
         if (target) openProject(target)
         browserNotice.close()
       }
-    } catch {
-      // 브라우저 알림 차단 또는 권한 오류 시 무시
+    } catch (error) {
+      console.warn('윈도우 알림 표시 실패:', error)
     }
   }
 
@@ -1953,6 +1982,7 @@ function DesignReviewPlatform() {
               <button type="button" onClick={() => { setIsNotificationPanelOpen((prev) => !prev); markAllNotificationsRead() }} className="relative flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] hover:border-[#4F7CFF]/50">🔔<span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#4F7CFF] text-[11px]">{notifications.filter((item) => !item.read).length || notifications.length}</span></button>
               
             </div>
+            <button type="button" onClick={requestDesktopNotificationPermission} title="윈도우 알림 허용" className="hidden h-11 items-center gap-2 rounded-xl border border-white/10 bg-[#1E293B] px-3 text-sm text-slate-200 hover:border-[#4F7CFF]/50 lg:flex">🔔 알림허용</button>
             <button type="button" onClick={() => (isAdminSession ? logoutAdmin() : openAdminLogin())} className="flex h-11 items-center gap-2 rounded-xl border border-[#4F7CFF]/30 bg-[#4F7CFF] px-4 text-sm font-medium text-white hover:bg-[#3B68EB]"><span>{isAdminSession ? '🛡️' : renderUserIcon()}</span><span>{isAdminSession ? `${adminAuthenticatedUser} 관리자` : `${currentUser || '사용자'} 인증`}</span></button>
           </div>
         </header>
