@@ -56,9 +56,15 @@ let remoteSaveTimer = null
 let remoteSavePayload = null
 let suppressRemoteSaveUntil = 0
 
+const PERSONAL_STORAGE_KEYS = new Set([
+  STORAGE_KEYS.currentUser,
+  STORAGE_KEYS.adminAuthenticatedUser,
+])
+
 const getLocalWorkspaceState = () => {
   const state = {}
   Object.values(STORAGE_KEYS).forEach((key) => {
+    if (PERSONAL_STORAGE_KEYS.has(key)) return
     try {
       const value = window.localStorage.getItem(key)
       if (value !== null) state[key] = JSON.parse(value)
@@ -72,6 +78,7 @@ const getLocalWorkspaceState = () => {
 const applyRemoteWorkspaceState = (state) => {
   if (!state || typeof state !== 'object') return
   Object.entries(state).forEach(([key, value]) => {
+    if (PERSONAL_STORAGE_KEYS.has(key)) return
     try {
       window.localStorage.setItem(key, JSON.stringify(value))
     } catch {
@@ -381,8 +388,6 @@ function DesignReviewPlatform() {
     setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
     setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
     setProjects(normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS))
-    setCurrentUser(state[STORAGE_KEYS.currentUser] || '이지혜')
-    setAdminAuthenticatedUser(state[STORAGE_KEYS.adminAuthenticatedUser] || '')
     setDrawings(state[STORAGE_KEYS.drawings] || {})
     setComments(state[STORAGE_KEYS.comments] || {})
     setViewStates(state[STORAGE_KEYS.viewStates] || {})
@@ -1335,25 +1340,25 @@ function DesignReviewPlatform() {
   }
 
   const authenticateAdmin = () => {
-    const targetAdmin = selectedAdminLoginUser || adminMembers[0]
-    if (!targetAdmin) return setNotice('팀원관리에서 관리자를 먼저 지정해주세요.')
-    if (adminLoginPassword !== '1234') return setNotice('관리자 인증 비밀번호가 맞지 않습니다.')
-    setCurrentUser(targetAdmin)
-    setAdminAuthenticatedUser(targetAdmin)
+    const targetUser = selectedAdminLoginUser || currentUser || teamMembers[0]
+    if (!targetUser) return setNotice('팀원관리에서 팀원을 먼저 추가해주세요.')
+    if (adminLoginPassword !== '1234') return setNotice('인증 비밀번호가 맞지 않습니다.')
+    setCurrentUser(targetUser)
+    setAdminAuthenticatedUser((teamMemberColors[targetUser] || 'worker') === 'admin' ? targetUser : '')
     setAdminLoginPassword('')
     setIsAdminLoginOpen(false)
-    setNotice(`${targetAdmin} 관리자 인증이 완료되었습니다.`)
+    setNotice(`${targetUser} 인증이 완료되었습니다.`)
   }
 
   const openAdminLogin = () => {
-    setSelectedAdminLoginUser(adminAuthenticatedUser || adminMembers[0] || '')
+    setSelectedAdminLoginUser(adminAuthenticatedUser || currentUser || teamMembers[0] || '')
     setAdminLoginPassword('')
     setIsAdminLoginOpen(true)
   }
 
   const logoutAdmin = () => {
     setAdminAuthenticatedUser('')
-    setNotice('관리자 인증이 해제되었습니다.')
+    setNotice('관리자 권한 인증이 해제되었습니다.')
   }
 
   const normalizeMailLink = (url) => (!url ? '' : url.startsWith('http') ? url : `https://${url}`)
@@ -1544,13 +1549,13 @@ function DesignReviewPlatform() {
   const renderAdminLogin = () => isAdminLoginOpen && (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div className="w-[420px] rounded-3xl border border-white/10 bg-[#111827] p-6 shadow-2xl">
-        <p className="text-xs font-medium text-[#FACC15]">관리자 인증</p>
-        <h3 className="mt-2 text-lg font-semibold text-white">관리자 계정 선택</h3>
-        <p className="mt-2 text-sm text-slate-300">관리자를 선택하고 비밀번호를 입력해주세요.</p>
-        <select value={selectedAdminLoginUser || adminMembers[0] || ''} onChange={(event) => setSelectedAdminLoginUser(event.target.value)} className="mt-5 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm text-white outline-none">
-          {adminMembers.map((member) => <option key={member} value={member}>{member}</option>)}
+        <p className="text-xs font-medium text-[#FACC15]">사용자 인증</p>
+        <h3 className="mt-2 text-lg font-semibold text-white">내 이름 선택</h3>
+        <p className="mt-2 text-sm text-slate-300">내 이름을 선택하고 비밀번호를 입력해주세요. 관리자는 팀원관리에서 관리자 권한으로 설정된 사람만 적용됩니다.</p>
+        <select value={selectedAdminLoginUser || currentUser || teamMembers[0] || ''} onChange={(event) => setSelectedAdminLoginUser(event.target.value)} className="mt-5 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm text-white outline-none">
+          {teamMembers.map((member) => <option key={member} value={member}>{member}</option>)}
         </select>
-        <input type="password" value={adminLoginPassword} onChange={(event) => setAdminLoginPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') authenticateAdmin() }} placeholder="관리자 비밀번호" className="mt-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" />
+        <input type="password" value={adminLoginPassword} onChange={(event) => setAdminLoginPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') authenticateAdmin() }} placeholder="인증 비밀번호" className="mt-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" />
         <p className="mt-2 text-xs text-slate-500">프로토타입 비밀번호: 1234</p>
         <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setIsAdminLoginOpen(false)} className="rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-3 text-sm text-white/80">취소</button><button type="button" onClick={authenticateAdmin} className="rounded-2xl bg-[#4F7CFF] px-5 py-3 text-sm font-medium text-white">인증하기</button></div>
       </div>
@@ -1695,7 +1700,7 @@ function DesignReviewPlatform() {
               <button type="button" onClick={() => { setIsNotificationPanelOpen((prev) => !prev); markAllNotificationsRead() }} className="relative flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] hover:border-[#4F7CFF]/50">🔔<span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#4F7CFF] text-[11px]">{notifications.filter((item) => !item.read).length || notifications.length}</span></button>
               
             </div>
-            <button type="button" onClick={() => (isAdminSession ? logoutAdmin() : openAdminLogin())} className="flex h-11 items-center gap-2 rounded-xl border border-[#4F7CFF]/30 bg-[#4F7CFF] px-4 text-sm font-medium text-white hover:bg-[#3B68EB]"><span>{isAdminSession ? '🛡️' : renderUserIcon()}</span><span>{isAdminSession ? `${adminAuthenticatedUser} 인증됨` : '관리자인증'}</span></button>
+            <button type="button" onClick={() => (isAdminSession ? logoutAdmin() : openAdminLogin())} className="flex h-11 items-center gap-2 rounded-xl border border-[#4F7CFF]/30 bg-[#4F7CFF] px-4 text-sm font-medium text-white hover:bg-[#3B68EB]"><span>{isAdminSession ? '🛡️' : renderUserIcon()}</span><span>{isAdminSession ? `${adminAuthenticatedUser} 관리자` : `${currentUser || '사용자'} 인증`}</span></button>
           </div>
         </header>
 
