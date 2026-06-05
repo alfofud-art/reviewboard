@@ -87,16 +87,111 @@ const applyRemoteWorkspaceState = (state) => {
   })
 }
 
+const getProjectIdentity = (project) => project?.id || project?.title || ''
+
+const getProjectUpdatedAt = (project) => {
+  const candidates = [
+    project?.updatedAt,
+    project?.completedAt,
+    project?.createdAt,
+    ...(project?.storedFiles || []).map((file) => file?.revisionRequestedAt || 0),
+  ].filter(Boolean)
+  return candidates.length ? Math.max(...candidates.map((value) => Number(value) || 0)) : 0
+}
+
+const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = []) => {
+  const map = new Map()
+
+  baseProjects.forEach((project) => {
+    const key = getProjectIdentity(project)
+    if (key) map.set(key, project)
+  })
+
+  incomingProjects.forEach((project) => {
+    const key = getProjectIdentity(project)
+    if (!key) return
+    const existing = map.get(key)
+    if (!existing) {
+      map.set(key, project)
+      return
+    }
+
+    const incomingTime = getProjectUpdatedAt(project)
+    const existingTime = getProjectUpdatedAt(existing)
+
+    if (incomingTime >= existingTime) {
+      map.set(key, project)
+    }
+  })
+
+  const incomingOrder = incomingProjects.map(getProjectIdentity).filter(Boolean)
+  const baseOrder = baseProjects.map(getProjectIdentity).filter(Boolean)
+  const orderedKeys = [...new Set([...incomingOrder, ...baseOrder])]
+
+  return orderedKeys.map((key) => map.get(key)).filter(Boolean)
+}
+
+const mergeNotificationsById = (baseNotifications = [], incomingNotifications = []) => {
+  const map = new Map()
+  ;[...baseNotifications, ...incomingNotifications].forEach((notice) => {
+    if (!notice?.id) return
+    map.set(notice.id, notice)
+  })
+  return Array.from(map.values())
+    .sort((a, b) => (b.createdAt || b.id || 0) - (a.createdAt || a.id || 0))
+    .slice(0, 60)
+}
+
+const mergeObjectValue = (baseValue, incomingValue) => ({
+  ...(baseValue && typeof baseValue === 'object' ? baseValue : {}),
+  ...(incomingValue && typeof incomingValue === 'object' ? incomingValue : {}),
+})
+
+const mergeWorkspaceStates = (baseState = {}, incomingState = {}) => {
+  const merged = { ...baseState, ...incomingState }
+
+  merged[STORAGE_KEYS.projects] = mergeProjectsByFreshness(
+    baseState[STORAGE_KEYS.projects] || [],
+    incomingState[STORAGE_KEYS.projects] || []
+  )
+
+  merged[STORAGE_KEYS.notifications] = mergeNotificationsById(
+    baseState[STORAGE_KEYS.notifications] || [],
+    incomingState[STORAGE_KEYS.notifications] || []
+  )
+
+  merged[STORAGE_KEYS.drawings] = mergeObjectValue(baseState[STORAGE_KEYS.drawings], incomingState[STORAGE_KEYS.drawings])
+  merged[STORAGE_KEYS.comments] = mergeObjectValue(baseState[STORAGE_KEYS.comments], incomingState[STORAGE_KEYS.comments])
+  merged[STORAGE_KEYS.viewStates] = mergeObjectValue(baseState[STORAGE_KEYS.viewStates], incomingState[STORAGE_KEYS.viewStates])
+  merged[STORAGE_KEYS.revisionCompletedFiles] = mergeObjectValue(
+    baseState[STORAGE_KEYS.revisionCompletedFiles],
+    incomingState[STORAGE_KEYS.revisionCompletedFiles]
+  )
+
+  PERSONAL_STORAGE_KEYS.forEach((key) => delete merged[key])
+  return merged
+}
+
 const saveWorkspaceToSupabase = async (state) => {
   if (!supabaseClient) return
   try {
+    const { data } = await supabaseClient
+      .from('reviewboard_workspace_state')
+      .select('state')
+      .eq('id', WORKSPACE_ID)
+      .maybeSingle()
+
+    const mergedState = mergeWorkspaceStates(data?.state || {}, state || {})
+
     await supabaseClient
       .from('reviewboard_workspace_state')
       .upsert({
         id: WORKSPACE_ID,
-        state,
+        state: mergedState,
         updated_at: new Date().toISOString(),
       })
+
+    applyRemoteWorkspaceState(mergedState)
   } catch (error) {
     console.warn('Supabase 저장 실패:', error)
   }
@@ -387,7 +482,7 @@ function DesignReviewPlatform() {
     suppressRemoteSaveUntil = Date.now() + 2200
     applyRemoteWorkspaceState(state)
 
-    const nextProjects = normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS)
+    const nextProjects = normalizeProjects(mergeProjectsByFreshness(projects, state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS))
     setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
     setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
     setProjects(nextProjects)
@@ -460,16 +555,17 @@ function DesignReviewPlatform() {
     if (!nextState || typeof nextState !== 'object') return
 
     const previousState = getLocalWorkspaceState()
+    const mergedNextState = mergeWorkspaceStates(previousState, nextState)
     const previousNoticeIds = new Set((previousState[STORAGE_KEYS.notifications] || []).map((notice) => notice.id))
-    const nextNotices = nextState[STORAGE_KEYS.notifications] || []
+    const nextNotices = mergedNextState[STORAGE_KEYS.notifications] || []
     const newNotices = nextNotices.filter((notice) => !previousNoticeIds.has(notice.id))
 
     const localUserName = adminAuthenticatedUser || currentUser
 
-    applyWorkspaceStateToReact(nextState)
+    applyWorkspaceStateToReact(mergedNextState)
 
     newNotices.forEach((notice) => {
-      const recipient = getNotificationRecipient(notice, nextState)
+      const recipient = getNotificationRecipient(notice, mergedNextState)
       if (recipient && recipient === localUserName) {
         setIncomingNotification(notice)
         showDesktopNotification(notice)
@@ -1069,7 +1165,7 @@ function DesignReviewPlatform() {
         const existingFiles = project.storedFiles || []
         const mergedFiles = newFiles.length ? [...existingFiles, ...newFiles] : existingFiles
         nextSelectedFiles = mergedFiles
-        return { ...project, title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: mergedFiles, files: mergedFiles.filter((file) => !file.isDocument).length, docs: mergedFiles.filter((file) => file.isDocument).length }
+        return { ...project, title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: mergedFiles, files: mergedFiles.filter((file) => !file.isDocument).length, docs: mergedFiles.filter((file) => file.isDocument).length, updatedAt: Date.now() }
       }))
       setSelectedProjectTitle(projectForm.title.trim())
       setUploadedFiles(nextSelectedFiles)
@@ -1236,7 +1332,7 @@ function DesignReviewPlatform() {
     if (!canEditSelectedProject) return setNotice('해당 작업자만 이미지를 삭제할 수 있습니다.')
     const nextFiles = uploadedFiles.filter((file) => file.id !== currentFile.id)
     setUploadedFiles(nextFiles)
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length, updatedAt: Date.now() } : project))
     setCurrentImageIndex(0)
     setNotice('이미지가 삭제되었습니다.')
   }
@@ -1419,7 +1515,7 @@ function DesignReviewPlatform() {
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
     setUploadedFiles(nextFiles)
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length, updatedAt: Date.now() } : project))
   }
 
   const authenticateAdmin = () => {
