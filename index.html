@@ -102,24 +102,27 @@ const getProjectUpdatedAt = (project) => {
 
 const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = [], deletedProjects = {}) => {
   const map = new Map()
-  const isDeleted = (project) => {
+  const deleted = deletedProjects || {}
+
+  const isProjectDeleted = (project) => {
     const key = getProjectIdentity(project)
     if (!key) return false
-    const deletedAt = Number(deletedProjects[key] || 0)
+    const deletedAt = Number(deleted[key] || deleted[project?.title] || 0)
     return deletedAt && deletedAt >= getProjectUpdatedAt(project)
   }
 
   baseProjects.forEach((project) => {
-    if (isDeleted(project)) return
+    if (isProjectDeleted(project)) return
     const key = getProjectIdentity(project)
     if (key) map.set(key, project)
   })
 
   incomingProjects.forEach((project) => {
-    if (isDeleted(project)) return
+    if (isProjectDeleted(project)) return
     const key = getProjectIdentity(project)
     if (!key) return
     const existing = map.get(key)
+
     if (!existing) {
       map.set(key, project)
       return
@@ -196,7 +199,9 @@ const saveWorkspaceToSupabase = async (state) => {
       .eq('id', WORKSPACE_ID)
       .maybeSingle()
 
-    const mergedState = mergeWorkspaceStates(data?.state || {}, state || {})
+    const remoteState = data?.state || {}
+    const localState = state || {}
+    const mergedState = mergeWorkspaceStates(remoteState, localState)
 
     await supabaseClient
       .from('reviewboard_workspace_state')
@@ -497,7 +502,10 @@ function DesignReviewPlatform() {
     suppressRemoteSaveUntil = Date.now() + 2200
     applyRemoteWorkspaceState(state)
 
-    const nextProjects = normalizeProjects(mergeProjectsByFreshness(projects, state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS, state[STORAGE_KEYS.deletedProjects] || {}))
+    const incomingProjects = state[STORAGE_KEYS.projects] || []
+    const localProjects = projects || []
+    const deletedProjects = state[STORAGE_KEYS.deletedProjects] || {}
+    const nextProjects = normalizeProjects(mergeProjectsByFreshness(localProjects, incomingProjects, deletedProjects))
     setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
     setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
     setProjects(nextProjects)
@@ -607,7 +615,7 @@ function DesignReviewPlatform() {
       .on(
         'postgres_changes',
         {
-          event: 'UPDATE',
+          event: '*',
           schema: 'public',
           table: 'reviewboard_workspace_state',
           filter: `id=eq.${WORKSPACE_ID}`,
@@ -883,7 +891,9 @@ function DesignReviewPlatform() {
 
   const addNotification = (type, project, meta = {}) => {
     const nextNotice = createNotificationItem(type, project, meta)
-    setNotifications((prev) => [nextNotice, ...prev].slice(0, 30))
+    const nextNotifications = [nextNotice, ...notifications].slice(0, 30)
+    setNotifications(nextNotifications)
+    saveWorkspaceToSupabase({ ...getLocalWorkspaceState(), [STORAGE_KEYS.notifications]: nextNotifications })
   }
 
   const markAllNotificationsRead = () => {
@@ -1201,7 +1211,9 @@ function DesignReviewPlatform() {
     const newProject = { id: `${Date.now()}-${projectForm.title}`, createdAt: Date.now(), title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, status: '컨펌대기', deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: newFiles, files: imageFiles.length, docs: docFiles.length }
     clearProjectDeletionRecord(newProject)
     clearProjectDeletionRecord(newProject)
-    setProjects((prev) => [newProject, ...prev].slice(0, 50))
+    const nextProjects = [newProject, ...projects].slice(0, 50)
+    setProjects(nextProjects)
+    saveWorkspaceToSupabase({ ...getLocalWorkspaceState(), [STORAGE_KEYS.projects]: nextProjects })
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setUploadedFiles(newFiles)
