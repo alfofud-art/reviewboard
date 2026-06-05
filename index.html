@@ -103,7 +103,7 @@ const getProjectUpdatedAt = (project) => {
 
 const getProjectStatusVersion = (project) => Number(project?.statusVersion || 0)
 
-const mergeProjectByVersion = (existing, incoming) => {
+const pickLatestProject = (existing, incoming) => {
   if (!existing) return incoming
   if (!incoming) return existing
 
@@ -113,10 +113,7 @@ const mergeProjectByVersion = (existing, incoming) => {
   if (incomingVersion > existingVersion) return incoming
   if (existingVersion > incomingVersion) return existing
 
-  const incomingTime = getProjectUpdatedAt(incoming)
-  const existingTime = getProjectUpdatedAt(existing)
-
-  return incomingTime >= existingTime ? incoming : existing
+  return getProjectUpdatedAt(incoming) >= getProjectUpdatedAt(existing) ? incoming : existing
 }
 
 const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = [], deletedProjects = {}) => {
@@ -141,7 +138,13 @@ const mergeProjectsByFreshness = (baseProjects = [], incomingProjects = [], dele
     const key = getProjectIdentity(project)
     if (!key) return
     const existing = map.get(key)
-    map.set(key, mergeProjectByVersion(existing, project))
+
+    if (!existing) {
+      map.set(key, project)
+      return
+    }
+
+    map.set(key, pickLatestProject(existing, project))
   })
 
   const incomingOrder = incomingProjects.map(getProjectIdentity).filter(Boolean)
@@ -641,7 +644,7 @@ function DesignReviewPlatform() {
     return () => {
       supabaseClient.removeChannel(channel)
     }
-  }, [currentUser, adminAuthenticatedUser, projects])
+  }, [currentUser, adminAuthenticatedUser])
 
   const menuItems = ['전체 프로젝트', '컨펌대기', '컨펌완료', '내 작업', '알림', '팀원 관리']
   const adminMembers = teamMembers.filter((member) => (teamMemberColors[member] || 'worker') === 'admin')
@@ -1261,9 +1264,7 @@ function DesignReviewPlatform() {
     const duplicatedCount = projects.filter((project) => project.title === baseTitle || project.title.startsWith(`${baseTitle} (`)).length
     const title = duplicatedCount ? `${baseTitle} (${duplicatedCount + 1})` : baseTitle
     const newProject = { id: `${Date.now()}-${title}`, createdAt: Date.now(), title, owner: currentUser || teamMembers[0] || '작업자', reviewer: quickUploadReviewer || adminMembers[0] || teamMembers[0] || '컨펌자', status: '컨펌대기', statusVersion: 1, statusUpdatedAt: Date.now(), updatedAt: Date.now(), deadline: quickUploadTodayDeadline ? todayString() : '', description: '', mailLink: '', storedFiles: quickUploadDraft.files, files: images.length, docs: docs.length }
-    const nextProjects = [newProject, ...projects].slice(0, 50)
-    setProjects(nextProjects)
-    saveWorkspaceToSupabase({ ...getLocalWorkspaceState(), [STORAGE_KEYS.projects]: nextProjects })
+    setProjects((prev) => [newProject, ...prev].slice(0, 50))
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setQuickUploadDraft(null)
