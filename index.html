@@ -480,7 +480,7 @@ function DesignReviewPlatform() {
     // Realtime 보조용. 단, 원격 적용 중에는 saveStorage가 재저장하지 않도록 막아둔다.
     const syncInterval = window.setInterval(() => {
       pullWorkspaceFromSupabase(false)
-    }, 2000)
+    }, 2500)
 
     return () => {
       isMounted = false
@@ -510,6 +510,29 @@ function DesignReviewPlatform() {
   const activeImageName = currentFile?.beforeUrl && activeCompareSide === 'before' ? currentFile.beforeName || 'before' : currentFile?.name
   const currentDrawings = drawings[activeImageKey] || []
   const currentComments = comments[activeImageKey] || []
+
+  const saveSharedStateNow = (overrides = {}) => {
+    const sharedState = {
+      [STORAGE_KEYS.teamMembers]: overrides.teamMembers ?? teamMembers,
+      [STORAGE_KEYS.teamMemberColors]: overrides.teamMemberColors ?? teamMemberColors,
+      [STORAGE_KEYS.projects]: overrides.projects ?? projects,
+      [STORAGE_KEYS.drawings]: overrides.drawings ?? drawings,
+      [STORAGE_KEYS.comments]: overrides.comments ?? comments,
+      [STORAGE_KEYS.viewStates]: overrides.viewStates ?? viewStates,
+      [STORAGE_KEYS.revisionCompletedFiles]: overrides.revisionCompletedFiles ?? revisionCompletedFiles,
+      [STORAGE_KEYS.notifications]: overrides.notifications ?? notifications,
+    }
+
+    Object.entries(sharedState).forEach(([key, value]) => {
+      try {
+        window.localStorage.setItem(key, JSON.stringify(value))
+      } catch {}
+    })
+
+    lastLocalWorkspaceChangeAt = Date.now()
+    saveWorkspaceToSupabase(sharedState)
+  }
+
 
   const filteredProjects = useMemo(() => {
     let list = projects
@@ -1008,13 +1031,15 @@ function DesignReviewPlatform() {
 
     if (editingProjectTitle) {
       let nextSelectedFiles = uploadedFiles
-      setProjects((prev) => prev.map((project) => {
+      const nextProjects = projects.map((project) => {
         if (project.title !== editingProjectTitle) return project
         const existingFiles = project.storedFiles || []
         const mergedFiles = newFiles.length ? [...existingFiles, ...newFiles] : existingFiles
         nextSelectedFiles = mergedFiles
         return { ...project, title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: mergedFiles, files: mergedFiles.filter((file) => !file.isDocument).length, docs: mergedFiles.filter((file) => file.isDocument).length }
-      }))
+      })
+      setProjects(nextProjects)
+      saveSharedStateNow({ projects: nextProjects })
       setSelectedProjectTitle(projectForm.title.trim())
       setUploadedFiles(nextSelectedFiles)
       setIsProjectModalOpen(false)
@@ -1023,7 +1048,9 @@ function DesignReviewPlatform() {
     }
 
     const newProject = { id: `${Date.now()}-${projectForm.title}`, createdAt: Date.now(), title: projectForm.title.trim(), owner: projectForm.owner, reviewer: projectForm.reviewer, status: '컨펌대기', deadline: projectForm.deadline, description: projectForm.description, mailLink: projectForm.mailLink, storedFiles: newFiles, files: imageFiles.length, docs: docFiles.length }
-    setProjects((prev) => [newProject, ...prev].slice(0, 50))
+    const nextProjects = [newProject, ...projects].slice(0, 50)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setUploadedFiles(newFiles)
@@ -1060,7 +1087,9 @@ function DesignReviewPlatform() {
     const duplicatedCount = projects.filter((project) => project.title === baseTitle || project.title.startsWith(`${baseTitle} (`)).length
     const title = duplicatedCount ? `${baseTitle} (${duplicatedCount + 1})` : baseTitle
     const newProject = { id: `${Date.now()}-${title}`, createdAt: Date.now(), title, owner: currentUser || teamMembers[0] || '작업자', reviewer: quickUploadReviewer || adminMembers[0] || teamMembers[0] || '컨펌자', status: '컨펌대기', deadline: quickUploadTodayDeadline ? todayString() : '', description: '', mailLink: '', storedFiles: quickUploadDraft.files, files: images.length, docs: docs.length }
-    setProjects((prev) => [newProject, ...prev].slice(0, 50))
+    const nextProjects = [newProject, ...projects].slice(0, 50)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     setSelectedProjectTitle(newProject.title)
     setSelectedCardTitle(newProject.title)
     setQuickUploadDraft(null)
@@ -1097,7 +1126,9 @@ function DesignReviewPlatform() {
     })
     const requestedFiles = nextFiles.filter((file) => !file.isDocument && file.revisionRequested)
     const nextStatus = requestedFiles.length ? '수정요청' : '컨펌대기'
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: nextStatus, revisionBeforeFiles: requestedFiles, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: nextStatus, revisionBeforeFiles: requestedFiles, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     setUploadedFiles(nextFiles)
     setCurrentImageIndex(0)
     addNotification(isAlreadyRequested ? '수정요청취소' : '수정요청', selectedProjectTitle)
@@ -1126,7 +1157,9 @@ function DesignReviewPlatform() {
       return before ? { ...file, beforeFile: before, beforeUrl: before.url, beforeName: before.name } : file
     })
     const nextFiles = [...nextImages, ...docs]
-    setProjects((prev) => prev.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length } : project))
+    const nextProjects = projects.map((project) => project.title === targetProject.title ? { ...project, status: '컨펌대기', revisionBeforeFiles: [], storedFiles: nextFiles, files: nextImages.length, docs: docs.length } : project)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     setSelectedProjectTitle(targetProject.title)
     setSelectedCardTitle(targetProject.title)
     setUploadedFiles(nextFiles)
@@ -1138,7 +1171,9 @@ function DesignReviewPlatform() {
 
   const completeApproval = () => {
     if (!selectedProjectTitle) return
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now() } : project))
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now() } : project)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     addNotification('컨펌완료', selectedProjectTitle)
     setNotice(`${selectedProjectTitle} 프로젝트가 컨펌완료로 변경되었습니다.`)
   }
@@ -1160,7 +1195,9 @@ function DesignReviewPlatform() {
     if (!currentFile) return
     const nextFiles = uploadedFiles.filter((file) => file.id !== currentFile.id)
     setUploadedFiles(nextFiles)
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
     setCurrentImageIndex(0)
     setNotice('이미지가 삭제되었습니다.')
   }
@@ -1343,7 +1380,9 @@ function DesignReviewPlatform() {
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
     setUploadedFiles(nextFiles)
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project)
+    setProjects(nextProjects)
+    saveSharedStateNow({ projects: nextProjects })
   }
 
   const authenticateAdmin = () => {
