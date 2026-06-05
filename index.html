@@ -54,6 +54,7 @@ const supabaseClient = isSupabaseConfigured() && window.supabase
 
 let remoteSaveTimer = null
 let remoteSavePayload = null
+let suppressRemoteSaveUntil = 0
 
 const getLocalWorkspaceState = () => {
   const state = {}
@@ -225,7 +226,7 @@ const loadStorage = (key, fallback) => {
 const saveStorage = (key, value) => {
   try {
     window.localStorage.setItem(key, JSON.stringify(value))
-    queueWorkspaceSave()
+    if (Date.now() > suppressRemoteSaveUntil) queueWorkspaceSave()
   } catch {
     // 저장공간 부족 시 앱 중단 방지
   }
@@ -373,25 +374,114 @@ function DesignReviewPlatform() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
 
 
+  const applyWorkspaceStateToReact = (state) => {
+    if (!state || typeof state !== 'object') return
+    suppressRemoteSaveUntil = Date.now() + 1800
+    applyRemoteWorkspaceState(state)
+    setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
+    setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
+    setProjects(normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS))
+    setCurrentUser(state[STORAGE_KEYS.currentUser] || '이지혜')
+    setAdminAuthenticatedUser(state[STORAGE_KEYS.adminAuthenticatedUser] || '')
+    setDrawings(state[STORAGE_KEYS.drawings] || {})
+    setComments(state[STORAGE_KEYS.comments] || {})
+    setViewStates(state[STORAGE_KEYS.viewStates] || {})
+    setRevisionCompletedFiles(state[STORAGE_KEYS.revisionCompletedFiles] || {})
+    setNotifications(state[STORAGE_KEYS.notifications] || [])
+  }
+
+  const getNotificationRecipient = (notice, workspaceState) => {
+    const nextProjects = normalizeProjects(workspaceState?.[STORAGE_KEYS.projects] || [])
+    const targetProject = nextProjects.find((project) => project.title === notice.project)
+    if (!targetProject) return ''
+
+    if (notice.type === '컨펌대기') return targetProject.reviewer
+    if (notice.type === '수정본업로드') return targetProject.reviewer
+    if (notice.type === '수정요청') return targetProject.owner
+    if (notice.type === '수정요청취소') return targetProject.owner
+    if (notice.type === '컨펌완료') return targetProject.owner
+    return ''
+  }
+
+  const showDesktopNotification = async (notice) => {
+    if (!notice || !('Notification' in window)) return
+    try {
+      let permission = Notification.permission
+      if (permission === 'default') permission = await Notification.requestPermission()
+      if (permission !== 'granted') return
+
+      const browserNotice = new Notification(`디자인 검토 위원회 · ${notice.title}`, {
+        body: notice.message,
+        icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"%3E%3Crect width="128" height="128" rx="28" fill="%234F7CFF"/%3E%3Ctext x="64" y="78" font-size="54" text-anchor="middle" fill="white"%3E%F0%9F%94%94%3C/text%3E%3C/svg%3E',
+        tag: `reviewboard-${notice.id}`,
+      })
+
+      browserNotice.onclick = () => {
+        window.focus()
+        const target = projects.find((project) => project.title === notice.project)
+        if (target) openProject(target)
+        browserNotice.close()
+      }
+    } catch {
+      // 브라우저 알림 차단 또는 권한 오류 시 무시
+    }
+  }
+
+  const handleRemoteWorkspaceState = (nextState) => {
+    if (!nextState || typeof nextState !== 'object') return
+
+    const previousState = getLocalWorkspaceState()
+    const previousNoticeIds = new Set((previousState[STORAGE_KEYS.notifications] || []).map((notice) => notice.id))
+    const nextNotices = nextState[STORAGE_KEYS.notifications] || []
+    const newNotices = nextNotices.filter((notice) => !previousNoticeIds.has(notice.id))
+
+    const localUserName = adminAuthenticatedUser || currentUser
+
+    applyWorkspaceStateToReact(nextState)
+
+    newNotices.forEach((notice) => {
+      const recipient = getNotificationRecipient(notice, nextState)
+      if (recipient && recipient === localUserName) {
+        showDesktopNotification(notice)
+      }
+    })
+  }
+
+
   useEffect(() => {
     const hydrateSharedWorkspace = async () => {
       const loaded = await loadWorkspaceFromSupabase()
       if (!loaded) return
-
-      setTeamMembers(loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
-      setTeamMemberColors(loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
-      setProjects(normalizeProjects(loadStorage(STORAGE_KEYS.projects, DEFAULT_PROJECTS)))
-      setCurrentUser(loadStorage(STORAGE_KEYS.currentUser, '이지혜'))
-      setAdminAuthenticatedUser(loadStorage(STORAGE_KEYS.adminAuthenticatedUser, ''))
-      setDrawings(loadStorage(STORAGE_KEYS.drawings, {}))
-      setComments(loadStorage(STORAGE_KEYS.comments, {}))
-      setViewStates(loadStorage(STORAGE_KEYS.viewStates, {}))
-      setRevisionCompletedFiles(loadStorage(STORAGE_KEYS.revisionCompletedFiles, {}))
-      setNotifications(loadStorage(STORAGE_KEYS.notifications, []))
+      applyWorkspaceStateToReact(getLocalWorkspaceState())
     }
 
     hydrateSharedWorkspace()
   }, [])
+
+  useEffect(() => {
+    if (!supabaseClient) return undefined
+
+    const channel = supabaseClient
+      .channel('reviewboard-workspace-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'reviewboard_workspace_state',
+          filter: `id=eq.${WORKSPACE_ID}`,
+        },
+        (payload) => {
+          const nextState = payload?.new?.state
+          handleRemoteWorkspaceState(nextState)
+        }
+      )
+      .subscribe()
+
+    return () => {
+      supabaseClient.removeChannel(channel)
+    }
+  }, [currentUser, adminAuthenticatedUser, projects])
 
   const menuItems = ['전체 프로젝트', '컨펌대기', '컨펌완료', '내 작업', '알림', '팀원 관리']
   const adminMembers = teamMembers.filter((member) => (teamMemberColors[member] || 'worker') === 'admin')
@@ -611,7 +701,7 @@ function DesignReviewPlatform() {
 
   const addNotification = (type, project, meta = {}) => {
     const copy = getNotificationCopy(type, project, meta)
-    const nextNotice = { id: Date.now(), ...copy, project, type, meta, read: false, createdAt: Date.now() }
+    const nextNotice = { id: Date.now(), ...copy, project, type, meta: { ...meta, actor: adminAuthenticatedUser || currentUser }, read: false, createdAt: Date.now() }
     setNotifications((prev) => [nextNotice, ...prev].slice(0, 30))
   }
 
