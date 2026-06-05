@@ -314,6 +314,7 @@ const normalizeProjects = (projects) => {
 function DesignReviewPlatform() {
   const fileInputRef = useRef(null)
   const revisionInputRef = useRef(null)
+  const isApplyingRemoteRef = useRef(false)
 
   const [teamMembers, setTeamMembers] = useState(() => loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
   const [teamMemberColors, setTeamMemberColors] = useState(() => loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
@@ -399,6 +400,7 @@ function DesignReviewPlatform() {
     const applyIncomingWorkspaceState = (state) => {
       if (!state || typeof state !== 'object') return
 
+      isApplyingRemoteRef.current = true
       applyRemoteWorkspaceState(state)
 
       setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
@@ -409,10 +411,14 @@ function DesignReviewPlatform() {
       setViewStates(state[STORAGE_KEYS.viewStates] || {})
       setRevisionCompletedFiles(state[STORAGE_KEYS.revisionCompletedFiles] || {})
       setNotifications(state[STORAGE_KEYS.notifications] || [])
+
+      window.setTimeout(() => {
+        isApplyingRemoteRef.current = false
+      }, 0)
     }
 
     const channel = supabaseClient
-      .channel('reviewboard-workspace-state')
+      .channel(`reviewboard-workspace-state-${Date.now()}-${Math.random().toString(36).slice(2)}`)
       .on(
         'postgres_changes',
         {
@@ -426,7 +432,9 @@ function DesignReviewPlatform() {
           if (nextState) applyIncomingWorkspaceState(nextState)
         }
       )
-      .subscribe()
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('Supabase Realtime 연결됨')
+      })
 
     return () => {
       supabaseClient.removeChannel(channel)
@@ -493,16 +501,21 @@ function DesignReviewPlatform() {
   const totalProjectPages = Math.max(1, Math.ceil(filteredProjects.length / PROJECTS_PER_PAGE))
   const pagedProjects = filteredProjects.slice((projectPage - 1) * PROJECTS_PER_PAGE, projectPage * PROJECTS_PER_PAGE)
 
-  useEffect(() => saveStorage(STORAGE_KEYS.teamMembers, teamMembers), [teamMembers])
-  useEffect(() => saveStorage(STORAGE_KEYS.teamMemberColors, teamMemberColors), [teamMemberColors])
-  useEffect(() => saveStorage(STORAGE_KEYS.projects, projects), [projects])
-  useEffect(() => saveStorage(STORAGE_KEYS.currentUser, currentUser), [currentUser])
-  useEffect(() => saveStorage(STORAGE_KEYS.adminAuthenticatedUser, adminAuthenticatedUser), [adminAuthenticatedUser])
-  useEffect(() => saveStorage(STORAGE_KEYS.drawings, drawings), [drawings])
-  useEffect(() => saveStorage(STORAGE_KEYS.comments, comments), [comments])
-  useEffect(() => saveStorage(STORAGE_KEYS.viewStates, viewStates), [viewStates])
-  useEffect(() => saveStorage(STORAGE_KEYS.revisionCompletedFiles, revisionCompletedFiles), [revisionCompletedFiles])
-  useEffect(() => saveStorage(STORAGE_KEYS.notifications, notifications), [notifications])
+  const saveSharedStorage = (key, value) => {
+    if (isApplyingRemoteRef.current) return
+    saveStorage(key, value)
+  }
+
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.teamMembers, teamMembers), [teamMembers])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.teamMemberColors, teamMemberColors), [teamMemberColors])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.projects, projects), [projects])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.currentUser, currentUser), [currentUser])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.adminAuthenticatedUser, adminAuthenticatedUser), [adminAuthenticatedUser])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.drawings, drawings), [drawings])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.comments, comments), [comments])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.viewStates, viewStates), [viewStates])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.revisionCompletedFiles, revisionCompletedFiles), [revisionCompletedFiles])
+  useEffect(() => saveSharedStorage(STORAGE_KEYS.notifications, notifications), [notifications])
 
   useEffect(() => {
     setProjectPage(1)
@@ -525,8 +538,13 @@ function DesignReviewPlatform() {
 
   useEffect(() => {
     const project = projects.find((item) => item.title === selectedProjectTitle)
-    if (project?.storedFiles?.length) setUploadedFiles(project.storedFiles)
-  }, [])
+    if (project?.storedFiles?.length) {
+      setUploadedFiles(project.storedFiles)
+      const imageFiles = project.storedFiles.filter((file) => !file.isDocument)
+      const nextVisibleImages = project.status === '수정요청' ? imageFiles.filter((file) => file.revisionRequested) : imageFiles
+      if (currentImageIndex >= nextVisibleImages.length) setCurrentImageIndex(0)
+    }
+  }, [projects, selectedProjectTitle])
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1285,25 +1303,26 @@ function DesignReviewPlatform() {
   }
 
   const authenticateAdmin = () => {
-    const targetAdmin = selectedAdminLoginUser || adminMembers[0]
-    if (!targetAdmin) return setNotice('팀원관리에서 관리자를 먼저 지정해주세요.')
-    if (adminLoginPassword !== '1234') return setNotice('관리자 인증 비밀번호가 맞지 않습니다.')
-    setCurrentUser(targetAdmin)
-    setAdminAuthenticatedUser(targetAdmin)
+    const targetUser = selectedAdminLoginUser || currentUser || teamMembers[0]
+    if (!targetUser) return setNotice('팀원을 먼저 추가해주세요.')
+    if (adminLoginPassword !== '1234') return setNotice('인증 비밀번호가 맞지 않습니다.')
+    setCurrentUser(targetUser)
+    setAdminAuthenticatedUser(targetUser)
     setAdminLoginPassword('')
     setIsAdminLoginOpen(false)
-    setNotice(`${targetAdmin} 관리자 인증이 완료되었습니다.`)
+    const roleText = (teamMemberColors[targetUser] || 'worker') === 'admin' ? '관리자' : '작업자'
+    setNotice(`${targetUser} ${roleText} 인증이 완료되었습니다.`)
   }
 
   const openAdminLogin = () => {
-    setSelectedAdminLoginUser(adminAuthenticatedUser || adminMembers[0] || '')
+    setSelectedAdminLoginUser(adminAuthenticatedUser || currentUser || teamMembers[0] || '')
     setAdminLoginPassword('')
     setIsAdminLoginOpen(true)
   }
 
   const logoutAdmin = () => {
     setAdminAuthenticatedUser('')
-    setNotice('관리자 인증이 해제되었습니다.')
+    setNotice('인증이 해제되었습니다.')
   }
 
   const normalizeMailLink = (url) => (!url ? '' : url.startsWith('http') ? url : `https://${url}`)
@@ -1494,14 +1513,14 @@ function DesignReviewPlatform() {
   const renderAdminLogin = () => isAdminLoginOpen && (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div className="w-[420px] rounded-3xl border border-white/10 bg-[#111827] p-6 shadow-2xl">
-        <p className="text-xs font-medium text-[#FACC15]">관리자 인증</p>
-        <h3 className="mt-2 text-lg font-semibold text-white">관리자 계정 선택</h3>
-        <p className="mt-2 text-sm text-slate-300">관리자를 선택하고 비밀번호를 입력해주세요.</p>
-        <select value={selectedAdminLoginUser || adminMembers[0] || ''} onChange={(event) => setSelectedAdminLoginUser(event.target.value)} className="mt-5 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm text-white outline-none">
-          {adminMembers.map((member) => <option key={member} value={member}>{member}</option>)}
+        <p className="text-xs font-medium text-[#93C5FD]">사용자 인증</p>
+        <h3 className="mt-2 text-lg font-semibold text-white">사용자 선택</h3>
+        <p className="mt-2 text-sm text-slate-300">본인 이름을 선택하고 비밀번호를 입력해주세요.</p>
+        <select value={selectedAdminLoginUser || currentUser || teamMembers[0] || ''} onChange={(event) => setSelectedAdminLoginUser(event.target.value)} className="mt-5 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm text-white outline-none">
+          {teamMembers.map((member) => <option key={member} value={member}>{member} · {(teamMemberColors[member] || 'worker') === 'admin' ? '관리자' : '작업자'}</option>)}
         </select>
-        <input type="password" value={adminLoginPassword} onChange={(event) => setAdminLoginPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') authenticateAdmin() }} placeholder="관리자 비밀번호" className="mt-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" />
-        <p className="mt-2 text-xs text-slate-500">프로토타입 비밀번호: 1234</p>
+        <input type="password" value={adminLoginPassword} onChange={(event) => setAdminLoginPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') authenticateAdmin() }} placeholder="인증 비밀번호" className="mt-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" />
+        <p className="mt-2 text-xs text-slate-500">공통 인증 비밀번호: 1234</p>
         <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setIsAdminLoginOpen(false)} className="rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-3 text-sm text-white/80">취소</button><button type="button" onClick={authenticateAdmin} className="rounded-2xl bg-[#4F7CFF] px-5 py-3 text-sm font-medium text-white">인증하기</button></div>
       </div>
     </div>
@@ -1645,7 +1664,7 @@ function DesignReviewPlatform() {
               <button type="button" onClick={() => { setIsNotificationPanelOpen((prev) => !prev); markAllNotificationsRead() }} className="relative flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] hover:border-[#4F7CFF]/50">🔔<span className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#4F7CFF] text-[11px]">{notifications.filter((item) => !item.read).length || notifications.length}</span></button>
               
             </div>
-            <button type="button" onClick={() => (isAdminSession ? logoutAdmin() : openAdminLogin())} className="flex h-11 items-center gap-2 rounded-xl border border-[#4F7CFF]/30 bg-[#4F7CFF] px-4 text-sm font-medium text-white hover:bg-[#3B68EB]"><span>{isAdminSession ? '🛡️' : renderUserIcon()}</span><span>{isAdminSession ? `${adminAuthenticatedUser} 인증됨` : '관리자인증'}</span></button>
+            <button type="button" onClick={() => (adminAuthenticatedUser ? logoutAdmin() : openAdminLogin())} className="flex h-11 items-center gap-2 rounded-xl border border-[#4F7CFF]/30 bg-[#4F7CFF] px-4 text-sm font-medium text-white hover:bg-[#3B68EB]"><span>{isAdminSession ? '🛡️' : renderUserIcon()}</span><span>{adminAuthenticatedUser ? `${adminAuthenticatedUser} 인증됨` : '인증'}</span></button>
           </div>
         </header>
 
@@ -1667,7 +1686,7 @@ function DesignReviewPlatform() {
             ) : activeMenu === '팀원 관리' ? (
               <div className="rounded-3xl border border-white/10 bg-[#1E293B] p-5">
                 {!isTeamUnlocked ? (
-                  <div><p className="mb-3 text-sm text-slate-300">관리자 비밀번호를 입력하세요.</p><input type="password" value={teamPassword} onChange={(event) => setTeamPassword(event.target.value)} placeholder="비밀번호" className="mb-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" /><button type="button" onClick={() => { if (teamPassword === '1234') setIsTeamUnlocked(true); else setNotice('비밀번호가 맞지 않습니다.') }} className="w-full rounded-2xl bg-[#4F7CFF] px-5 py-3 text-sm font-medium">입장</button><p className="mt-3 text-xs text-slate-500">프로토타입 비밀번호: 1234</p></div>
+                  <div><p className="mb-3 text-sm text-slate-300">관리자 비밀번호를 입력하세요.</p><input type="password" value={teamPassword} onChange={(event) => setTeamPassword(event.target.value)} placeholder="비밀번호" className="mb-3 w-full rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" /><button type="button" onClick={() => { if (teamPassword === '1234') setIsTeamUnlocked(true); else setNotice('비밀번호가 맞지 않습니다.') }} className="w-full rounded-2xl bg-[#4F7CFF] px-5 py-3 text-sm font-medium">입장</button><p className="mt-3 text-xs text-slate-500">공통 인증 비밀번호: 1234</p></div>
                 ) : (
                   <div className="space-y-4"><div className="flex gap-2"><input value={newMemberName} onChange={(event) => setNewMemberName(event.target.value)} placeholder="팀원 이름 추가" className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-[#0F172A] px-4 py-3 text-sm outline-none" /><button type="button" onClick={() => { const name = newMemberName.trim(); if (!name) return; setTeamMembers((prev) => [...prev, name]); setTeamMemberColors((prev) => ({ ...prev, [name]: 'worker' })); setNewMemberName('') }} className="rounded-2xl bg-[#4F7CFF] px-4 py-3 text-sm font-medium">추가</button></div>{teamMembers.map((member) => <div key={member} className="group flex h-[52px] items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.06] px-4"><span className={`min-w-0 flex-1 truncate text-sm ${getMemberColorClass(member)}`}>{member}</span><select value={teamMemberColors[member] || 'worker'} onChange={(event) => setTeamMemberColors((prev) => ({ ...prev, [member]: event.target.value }))} className="h-8 rounded-xl border border-white/10 bg-[#0F172A] px-2 text-xs text-white/80 outline-none"><option value="worker">작업자</option><option value="admin">관리자</option></select><button type="button" onClick={() => setTeamMembers((prev) => prev.filter((item) => item !== member))} className="flex h-7 w-7 items-center justify-center rounded-full text-white/0 group-hover:bg-white/[0.04] group-hover:text-white">×</button></div>)}</div>
                 )}
