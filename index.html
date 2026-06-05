@@ -505,7 +505,7 @@ function DesignReviewPlatform() {
     const incomingProjects = state[STORAGE_KEYS.projects] || []
     const localProjects = projects || []
     const deletedProjects = state[STORAGE_KEYS.deletedProjects] || {}
-    const nextProjects = normalizeProjects(mergeProjectsByFreshness(localProjects, incomingProjects, deletedProjects))
+    const nextProjects = normalizeProjects(mergeProjectsByFreshness([], incomingProjects, deletedProjects))
     setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
     setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
     setProjects(nextProjects)
@@ -578,17 +578,16 @@ function DesignReviewPlatform() {
     if (!nextState || typeof nextState !== 'object') return
 
     const previousState = getLocalWorkspaceState()
-    const mergedNextState = mergeWorkspaceStates(previousState, nextState)
     const previousNoticeIds = new Set((previousState[STORAGE_KEYS.notifications] || []).map((notice) => notice.id))
-    const nextNotices = mergedNextState[STORAGE_KEYS.notifications] || []
+    const nextNotices = nextState[STORAGE_KEYS.notifications] || []
     const newNotices = nextNotices.filter((notice) => !previousNoticeIds.has(notice.id))
 
     const localUserName = adminAuthenticatedUser || currentUser
 
-    applyWorkspaceStateToReact(mergedNextState)
+    applyWorkspaceStateToReact(nextState)
 
     newNotices.forEach((notice) => {
-      const recipient = getNotificationRecipient(notice, mergedNextState)
+      const recipient = getNotificationRecipient(notice, nextState)
       if (recipient && recipient === localUserName) {
         setIncomingNotification(notice)
         showDesktopNotification(notice)
