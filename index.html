@@ -185,7 +185,7 @@ const subscribeWorkspaceRealtime = (onRemoteChange) => {
         if (!nextState) return
 
         applyRemoteWorkspaceState(nextState)
-        onRemoteChange?.()
+        onRemoteChange?.(nextState)
       }
     )
     .subscribe((status) => {
@@ -437,27 +437,49 @@ function DesignReviewPlatform() {
 
 
   useEffect(() => {
-    const refreshSharedWorkspace = () => {
-      setTeamMembers(loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
-      setTeamMemberColors(loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
-      setProjects(normalizeProjects(loadStorage(STORAGE_KEYS.projects, DEFAULT_PROJECTS)))
-      setDrawings(loadStorage(STORAGE_KEYS.drawings, {}))
-      setComments(loadStorage(STORAGE_KEYS.comments, {}))
-      setViewStates(loadStorage(STORAGE_KEYS.viewStates, {}))
-      setRevisionCompletedFiles(loadStorage(STORAGE_KEYS.revisionCompletedFiles, {}))
-      setNotifications(loadStorage(STORAGE_KEYS.notifications, []))
+    const loadSupabaseStateToScreen = async () => {
+      if (!supabaseClient) {
+        hasLoadedRemoteWorkspace = true
+        return
+      }
+
+      try {
+        const { data, error } = await supabaseClient
+          .from('reviewboard_workspace_state')
+          .select('state')
+          .eq('id', WORKSPACE_ID)
+          .maybeSingle()
+
+        if (error) {
+          console.warn('Supabase 불러오기 실패:', error)
+          hasLoadedRemoteWorkspace = true
+          return
+        }
+
+        if (data?.state) {
+          isApplyingRemoteWorkspace = true
+          applyRemoteWorkspaceState(data.state)
+          applySharedStateToScreen(data.state)
+          window.setTimeout(() => {
+            isApplyingRemoteWorkspace = false
+            hasLoadedRemoteWorkspace = true
+          }, 500)
+          return
+        }
+
+        hasLoadedRemoteWorkspace = true
+        await saveWorkspaceToSupabase(getLocalWorkspaceState())
+      } catch (error) {
+        console.warn('Supabase 초기 동기화 실패:', error)
+        hasLoadedRemoteWorkspace = true
+      }
     }
 
-    const hydrateSharedWorkspace = async () => {
-      const loaded = await loadWorkspaceFromSupabase()
-      if (loaded) refreshSharedWorkspace()
-      else hasLoadedRemoteWorkspace = true
-    }
+    loadSupabaseStateToScreen()
 
-    hydrateSharedWorkspace()
-
-    const channel = subscribeWorkspaceRealtime(() => {
-      refreshSharedWorkspace()
+    const channel = subscribeWorkspaceRealtime((nextState) => {
+      if (!nextState) return
+      applySharedStateToScreen(nextState)
     })
 
     return () => {
@@ -486,6 +508,44 @@ function DesignReviewPlatform() {
   const activeImageName = currentFile?.beforeUrl && activeCompareSide === 'before' ? currentFile.beforeName || 'before' : currentFile?.name
   const currentDrawings = drawings[activeImageKey] || []
   const currentComments = comments[activeImageKey] || []
+
+  const applySharedStateToScreen = (state) => {
+    if (!state || typeof state !== 'object') return
+
+    const nextTeamMembers = state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS
+    const nextTeamMemberColors = state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS
+    const nextProjects = normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS)
+    const nextDrawings = state[STORAGE_KEYS.drawings] || {}
+    const nextComments = state[STORAGE_KEYS.comments] || {}
+    const nextViewStates = state[STORAGE_KEYS.viewStates] || {}
+    const nextRevisionCompletedFiles = state[STORAGE_KEYS.revisionCompletedFiles] || {}
+    const nextNotifications = state[STORAGE_KEYS.notifications] || []
+
+    setTeamMembers(nextTeamMembers)
+    setTeamMemberColors(nextTeamMemberColors)
+    setProjects(nextProjects)
+    setDrawings(nextDrawings)
+    setComments(nextComments)
+    setViewStates(nextViewStates)
+    setRevisionCompletedFiles(nextRevisionCompletedFiles)
+    setNotifications(nextNotifications)
+
+    const stillExistsSelected = nextProjects.find((project) => project.title === selectedProjectTitle)
+    const nextSelectedProject = stillExistsSelected || nextProjects[0]
+
+    if (nextSelectedProject) {
+      setSelectedProjectTitle(nextSelectedProject.title)
+      setSelectedCardTitle(nextSelectedProject.title)
+      setUploadedFiles(nextSelectedProject.storedFiles || [])
+      setCurrentImageIndex(0)
+    } else {
+      setSelectedProjectTitle('')
+      setSelectedCardTitle('')
+      setUploadedFiles([])
+      setCurrentImageIndex(0)
+    }
+  }
+
 
   const saveProjectsToSupabaseNow = (nextProjects, extra = {}) => {
     const nextState = {
