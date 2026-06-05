@@ -384,11 +384,24 @@ function DesignReviewPlatform() {
 
   const applyWorkspaceStateToReact = (state) => {
     if (!state || typeof state !== 'object') return
-    suppressRemoteSaveUntil = Date.now() + 1800
+    suppressRemoteSaveUntil = Date.now() + 2200
     applyRemoteWorkspaceState(state)
+
+    const nextProjects = normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS)
     setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
     setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
-    setProjects(normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS))
+    setProjects(nextProjects)
+
+    const syncedSelectedProject = nextProjects.find((project) => project.title === selectedProjectTitle)
+    if (syncedSelectedProject) {
+      const nextFiles = syncedSelectedProject.storedFiles || []
+      const nextImages = syncedSelectedProject.status === '수정요청'
+        ? nextFiles.filter((file) => !file.isDocument && file.revisionRequested)
+        : nextFiles.filter((file) => !file.isDocument)
+      setUploadedFiles(nextFiles)
+      setCurrentImageIndex((prev) => Math.min(prev, Math.max(nextImages.length - 1, 0)))
+    }
+
     setDrawings(state[STORAGE_KEYS.drawings] || {})
     setComments(state[STORAGE_KEYS.comments] || {})
     setViewStates(state[STORAGE_KEYS.viewStates] || {})
@@ -505,6 +518,9 @@ function DesignReviewPlatform() {
   const isAdminSession = Boolean(adminAuthenticatedUser && (teamMemberColors[adminAuthenticatedUser] || 'worker') === 'admin')
   const selectedProject = projects.find((project) => project.title === selectedProjectTitle)
   const isAssignedReviewProject = Boolean(isAdminSession && selectedProject?.reviewer === adminAuthenticatedUser)
+  const canDeleteProject = (project) => Boolean(project && (isAdminSession || project.owner === currentUser))
+  const canEditProject = (project) => Boolean(project && project.owner === currentUser)
+  const canEditSelectedProject = Boolean(selectedProject && selectedProject.owner === currentUser)
   const uploadedImages = uploadedFiles.filter((file) => !file.isDocument)
   const uploadedDocs = uploadedFiles.filter((file) => file.isDocument)
   const shouldShowOnlyRevisionRequested = selectedProject?.status === '수정요청'
@@ -722,9 +738,31 @@ function DesignReviewPlatform() {
     return { title: '컨펌 요청 등록', message: `${project} 건이 컨펌대기로 등록되었습니다.`, tone: 'blue', icon: '🔔' }
   }
 
-  const addNotification = (type, project, meta = {}) => {
+  const createNotificationItem = (type, project, meta = {}) => {
     const copy = getNotificationCopy(type, project, meta)
-    const nextNotice = { id: Date.now(), ...copy, project, type, meta: { ...meta, actor: adminAuthenticatedUser || currentUser }, read: false, createdAt: Date.now() }
+    return { id: Date.now(), ...copy, project, type, meta: { ...meta, actor: adminAuthenticatedUser || currentUser }, read: false, createdAt: Date.now() }
+  }
+
+  const commitProjectsWithNotification = (nextProjects, type, projectTitle, meta = {}) => {
+    const nextNotice = createNotificationItem(type, projectTitle, meta)
+    const nextNotifications = [nextNotice, ...notifications].slice(0, 30)
+
+    setProjects(nextProjects)
+    setNotifications(nextNotifications)
+
+    const nextWorkspaceState = {
+      ...getLocalWorkspaceState(),
+      [STORAGE_KEYS.projects]: nextProjects,
+      [STORAGE_KEYS.notifications]: nextNotifications,
+    }
+
+    suppressRemoteSaveUntil = Date.now() + 1200
+    applyRemoteWorkspaceState(nextWorkspaceState)
+    saveWorkspaceToSupabase(nextWorkspaceState)
+  }
+
+  const addNotification = (type, project, meta = {}) => {
+    const nextNotice = createNotificationItem(type, project, meta)
     setNotifications((prev) => [nextNotice, ...prev].slice(0, 30))
   }
 
@@ -1008,6 +1046,7 @@ function DesignReviewPlatform() {
   }
 
   const openEditProjectModal = (project) => {
+    if (!canEditProject(project)) return setNotice('해당 작업자만 상세정보를 수정할 수 있습니다.')
     setEditingProjectTitle(project.title)
     setProjectForm({ title: project.title, owner: project.owner, reviewer: project.reviewer, deadline: project.deadline || '', description: project.description || '', mailLink: project.mailLink || '' })
     setProjectImages([])
@@ -1022,6 +1061,8 @@ function DesignReviewPlatform() {
     const newFiles = [...imageFiles, ...docFiles]
 
     if (editingProjectTitle) {
+      const editingProject = projects.find((project) => project.title === editingProjectTitle)
+      if (!canEditProject(editingProject)) return setNotice('해당 작업자만 상세정보를 수정할 수 있습니다.')
       let nextSelectedFiles = uploadedFiles
       setProjects((prev) => prev.map((project) => {
         if (project.title !== editingProjectTitle) return project
@@ -1112,10 +1153,23 @@ function DesignReviewPlatform() {
     })
     const requestedFiles = nextFiles.filter((file) => !file.isDocument && file.revisionRequested)
     const nextStatus = requestedFiles.length ? '수정요청' : '컨펌대기'
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: nextStatus, revisionBeforeFiles: requestedFiles, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
+
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle
+      ? {
+        ...project,
+        status: nextStatus,
+        revisionBeforeFiles: requestedFiles,
+        storedFiles: nextFiles,
+        files: nextFiles.filter((file) => !file.isDocument).length,
+        docs: nextFiles.filter((file) => file.isDocument).length,
+        updatedAt: Date.now(),
+      }
+      : project
+    )
+
     setUploadedFiles(nextFiles)
     setCurrentImageIndex(0)
-    addNotification(isAlreadyRequested ? '수정요청취소' : '수정요청', selectedProjectTitle)
+
     if (!isAlreadyRequested) {
       setRevisionCompletedFiles((prev) => {
         const next = { ...prev }
@@ -1123,6 +1177,13 @@ function DesignReviewPlatform() {
         return next
       })
     }
+
+    commitProjectsWithNotification(
+      nextProjects,
+      isAlreadyRequested ? '수정요청취소' : '수정요청',
+      selectedProjectTitle
+    )
+
     setNotice(isAlreadyRequested ? '수정요청이 취소되어 카드가 컨펌대기로 복귀했습니다.' : '현재 이미지를 수정요청 대상으로 표시했습니다. 수정없음은 자동 해제되었습니다.')
   }
 
@@ -1153,12 +1214,14 @@ function DesignReviewPlatform() {
 
   const completeApproval = () => {
     if (!selectedProjectTitle) return
-    setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now() } : project))
-    addNotification('컨펌완료', selectedProjectTitle)
+    const nextProjects = projects.map((project) => project.title === selectedProjectTitle ? { ...project, status: '컨펌완료', completedAt: Date.now(), updatedAt: Date.now() } : project)
+    commitProjectsWithNotification(nextProjects, '컨펌완료', selectedProjectTitle)
     setNotice(`${selectedProjectTitle} 프로젝트가 컨펌완료로 변경되었습니다.`)
   }
 
   const deleteProject = (title) => {
+    const targetProject = projects.find((project) => project.title === title)
+    if (!canDeleteProject(targetProject)) return setNotice('관리자 또는 해당 작업자만 카드를 삭제할 수 있습니다.')
     setProjects((prev) => prev.filter((project) => project.title !== title))
     if (selectedProjectTitle === title) {
       setSelectedProjectTitle('')
@@ -1170,6 +1233,7 @@ function DesignReviewPlatform() {
 
   const deleteCurrentFile = () => {
     if (!currentFile) return
+    if (!canEditSelectedProject) return setNotice('해당 작업자만 이미지를 삭제할 수 있습니다.')
     const nextFiles = uploadedFiles.filter((file) => file.id !== currentFile.id)
     setUploadedFiles(nextFiles)
     setProjects((prev) => prev.map((project) => project.title === selectedProjectTitle ? { ...project, storedFiles: nextFiles, files: nextFiles.filter((file) => !file.isDocument).length, docs: nextFiles.filter((file) => file.isDocument).length } : project))
@@ -1351,6 +1415,7 @@ function DesignReviewPlatform() {
 
   const deleteAttachment = async (targetFile) => {
     if (!targetFile) return
+    if (!canEditSelectedProject) return setNotice('해당 작업자만 첨부파일을 삭제할 수 있습니다.')
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
     setUploadedFiles(nextFiles)
@@ -1438,7 +1503,7 @@ function DesignReviewPlatform() {
         <button type="button" onClick={zoomIn} className="h-9 rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]">＋</button>
         <button type="button" onClick={resetView} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]"><span className="responsive-tool-text">초기화</span><span className="hidden max-[1720px]:inline">⌂</span></button>
         <button type="button" onClick={downloadCurrentReviewImage} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]"><span className="responsive-tool-text">다운로드</span><span className="hidden max-[1720px]:inline">↓</span></button>
-        <button type="button" onClick={deleteCurrentFile} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-red-300 hover:bg-red-500/20"><span className="responsive-tool-text">이미지 삭제</span><span className="hidden max-[1720px]:inline">🗑️</span></button>
+        {canEditSelectedProject && <button type="button" onClick={deleteCurrentFile} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-red-300 hover:bg-red-500/20"><span className="responsive-tool-text">이미지 삭제</span><span className="hidden max-[1720px]:inline">🗑️</span></button>}
       </div>
     )
   }
@@ -1708,14 +1773,14 @@ function DesignReviewPlatform() {
           <div className="absolute inset-0 bg-black/60" onClick={() => setIsMobileMenuOpen(false)} />
           <aside className="absolute left-0 top-0 flex h-full w-[260px] flex-col justify-between border-r border-white/5 bg-[#0F172A] p-6 shadow-2xl">
             <div><div className="mb-10 flex items-start justify-between"><div><h1 className="text-2xl font-bold tracking-tight">ReviewBoard</h1><p className="mt-1 text-sm text-slate-400">디자인 컨펌 협업 플랫폼</p></div><button type="button" onClick={() => setIsMobileMenuOpen(false)} className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.06]">×</button></div><nav className="space-y-2">{menuItems.map((item) => <button key={item} type="button" onClick={() => { setActiveMenu(item); setIsMobileMenuOpen(false) }} className={`w-full rounded-xl border px-4 py-3 text-left text-sm transition ${activeMenu === item ? 'border-[#4F7CFF]/40 bg-[#1E293B] text-white' : 'border-transparent text-slate-400 hover:bg-[#1E293B]/70 hover:text-white'}`}>{item}</button>)}</nav></div>
-            <div>{isAdminSession ? <button type="button" onClick={() => { setActiveMenu('담당 컨펌'); setIsMobileMenuOpen(false) }} className={`mb-3 flex w-full items-center justify-center rounded-2xl border px-4 py-4 text-sm font-semibold transition ${activeMenu === '담당 컨펌' ? 'border-[#8AB4FF]/70 bg-[#4F7CFF]/25 text-white shadow-[0_0_18px_rgba(79,124,255,0.28)]' : 'border-[#8AB4FF]/45 bg-[#4F7CFF]/10 text-[#DBEAFE] hover:bg-[#4F7CFF]/18'}`}>담당 컨펌</button> : <button type="button" onClick={() => { if (!selectedProject) return setNotice('상세정보를 추가할 프로젝트를 먼저 선택해주세요.'); openEditProjectModal(selectedProject); setIsMobileMenuOpen(false) }} className="mb-3 flex w-full items-center justify-center rounded-2xl border border-[#8AB4FF]/45 bg-[#4F7CFF]/10 px-4 py-4 text-sm font-semibold text-[#DBEAFE] transition hover:bg-[#4F7CFF]/18">상세정보 추가</button>}<div className="rounded-2xl border border-white/10 bg-[#1E293B] p-4 text-sm"><p className="mb-2 text-slate-300">오늘 현황</p><div className="flex justify-between"><span>컨펌대기</span><span className="text-yellow-400">{projects.filter((p) => p.status !== '컨펌완료').length}건</span></div><div className="mt-2 flex justify-between"><span>컨펌완료</span><span className="text-green-400">{projects.filter((p) => p.status === '컨펌완료').length}건</span></div></div></div>
+            <div>{isAdminSession ? <button type="button" onClick={() => { setActiveMenu('담당 컨펌'); setIsMobileMenuOpen(false) }} className={`mb-3 flex w-full items-center justify-center rounded-2xl border px-4 py-4 text-sm font-semibold transition ${activeMenu === '담당 컨펌' ? 'border-[#8AB4FF]/70 bg-[#4F7CFF]/25 text-white shadow-[0_0_18px_rgba(79,124,255,0.28)]' : 'border-[#8AB4FF]/45 bg-[#4F7CFF]/10 text-[#DBEAFE] hover:bg-[#4F7CFF]/18'}`}>담당 컨펌</button> : canEditSelectedProject ? <button type="button" onClick={() => { if (!selectedProject) return setNotice('상세정보를 추가할 프로젝트를 먼저 선택해주세요.'); openEditProjectModal(selectedProject); setIsMobileMenuOpen(false) }} className="mb-3 flex w-full items-center justify-center rounded-2xl border border-[#8AB4FF]/45 bg-[#4F7CFF]/10 px-4 py-4 text-sm font-semibold text-[#DBEAFE] transition hover:bg-[#4F7CFF]/18">상세정보 추가</button> : <div className="mb-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-4 text-center text-sm text-slate-500">상세정보 수정 권한 없음</div>}<div className="rounded-2xl border border-white/10 bg-[#1E293B] p-4 text-sm"><p className="mb-2 text-slate-300">오늘 현황</p><div className="flex justify-between"><span>컨펌대기</span><span className="text-yellow-400">{projects.filter((p) => p.status !== '컨펌완료').length}건</span></div><div className="mt-2 flex justify-between"><span>컨펌완료</span><span className="text-green-400">{projects.filter((p) => p.status === '컨펌완료').length}건</span></div></div></div>
           </aside>
         </div>
       )}
 
       <aside className="hidden w-[250px] flex-col justify-between border-r border-white/5 bg-[#0F172A] p-6 xl:flex">
         <div><div className="mb-10"><h1 className="text-2xl font-bold tracking-tight">ReviewBoard</h1><p className="mt-1 text-sm text-slate-400">디자인 컨펌 협업 플랫폼</p></div><nav className="space-y-2">{menuItems.map((item) => <button key={item} type="button" onClick={() => setActiveMenu(item)} className={`w-full rounded-xl border px-4 py-3 text-left text-sm transition ${activeMenu === item ? 'border-[#4F7CFF]/40 bg-[#1E293B] text-white' : 'border-transparent text-slate-400 hover:bg-[#1E293B]/70 hover:text-white'}`}>{item}</button>)}</nav></div>
-        <div>{isAdminSession ? <button type="button" onClick={() => setActiveMenu('담당 컨펌')} className={`mb-3 flex w-full items-center justify-center rounded-2xl border px-4 py-4 text-sm font-semibold transition ${activeMenu === '담당 컨펌' ? 'border-[#8AB4FF]/70 bg-[#4F7CFF]/25 text-white shadow-[0_0_18px_rgba(79,124,255,0.28)]' : 'border-[#8AB4FF]/45 bg-[#4F7CFF]/10 text-[#DBEAFE] hover:bg-[#4F7CFF]/18'}`}>담당 컨펌</button> : <button type="button" onClick={() => { if (!selectedProject) return setNotice('상세정보를 추가할 프로젝트를 먼저 선택해주세요.'); openEditProjectModal(selectedProject) }} className="mb-3 flex w-full items-center justify-center rounded-2xl border border-[#8AB4FF]/45 bg-[#4F7CFF]/10 px-4 py-4 text-sm font-semibold text-[#DBEAFE] transition hover:bg-[#4F7CFF]/18">상세정보 추가</button>}<div className="rounded-2xl border border-white/10 bg-[#1E293B] p-4 text-sm"><p className="mb-2 text-slate-300">오늘 현황</p><div className="flex justify-between"><span>컨펌대기</span><span className="text-yellow-400">{projects.filter((p) => p.status !== '컨펌완료').length}건</span></div><div className="mt-2 flex justify-between"><span>컨펌완료</span><span className="text-green-400">{projects.filter((p) => p.status === '컨펌완료').length}건</span></div></div></div>
+        <div>{isAdminSession ? <button type="button" onClick={() => setActiveMenu('담당 컨펌')} className={`mb-3 flex w-full items-center justify-center rounded-2xl border px-4 py-4 text-sm font-semibold transition ${activeMenu === '담당 컨펌' ? 'border-[#8AB4FF]/70 bg-[#4F7CFF]/25 text-white shadow-[0_0_18px_rgba(79,124,255,0.28)]' : 'border-[#8AB4FF]/45 bg-[#4F7CFF]/10 text-[#DBEAFE] hover:bg-[#4F7CFF]/18'}`}>담당 컨펌</button> : canEditSelectedProject ? <button type="button" onClick={() => { if (!selectedProject) return setNotice('상세정보를 추가할 프로젝트를 먼저 선택해주세요.'); openEditProjectModal(selectedProject) }} className="mb-3 flex w-full items-center justify-center rounded-2xl border border-[#8AB4FF]/45 bg-[#4F7CFF]/10 px-4 py-4 text-sm font-semibold text-[#DBEAFE] transition hover:bg-[#4F7CFF]/18">상세정보 추가</button> : <div className="mb-3 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-4 text-center text-sm text-slate-500">상세정보 수정 권한 없음</div>}<div className="rounded-2xl border border-white/10 bg-[#1E293B] p-4 text-sm"><p className="mb-2 text-slate-300">오늘 현황</p><div className="flex justify-between"><span>컨펌대기</span><span className="text-yellow-400">{projects.filter((p) => p.status !== '컨펌완료').length}건</span></div><div className="mt-2 flex justify-between"><span>컨펌완료</span><span className="text-green-400">{projects.filter((p) => p.status === '컨펌완료').length}건</span></div></div></div>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -1774,7 +1839,7 @@ function DesignReviewPlatform() {
                   <div className="relative z-10 flex items-start justify-between gap-4"><div className="min-w-0"><div className="mb-2 flex min-h-[48px] items-start gap-2"><span>{isAdminSession ? '🔓' : '🔒'}</span><h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-6">{project.title}</h3></div><div className="space-y-1 text-sm text-slate-300"><p>작업자: {project.owner}</p><p>컨펌: {project.reviewer}</p></div></div><div className="flex shrink-0 flex-col items-end gap-2">{project.deadline === todayString() && <span className="inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full border border-red-400/50 bg-red-500/20 px-3 text-xs font-semibold text-red-100">오늘마감</span>}{project.reviewer === currentUser && <span className="inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full border border-[#8AB4FF]/55 bg-[#4F7CFF]/18 px-3 text-xs font-semibold text-[#DBEAFE]">담당 컨펌</span>}<span className={`inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full px-3 text-xs font-semibold ${statusBadgeClass(project.status)}`}>{project.status}</span></div></div>
                   {project.description && <p className="relative z-10 mt-4 line-clamp-2 text-xs text-white/70">{project.description}</p>}
                   {project.mailLink && <a href={normalizeMailLink(project.mailLink)} target="_blank" rel="noopener noreferrer" onClick={(event) => openMailLink(event, project.mailLink)} className="relative z-10 mt-3 block truncate text-xs text-[#93C5FD] hover:underline">메일 링크 열기</a>}
-                  <div className="relative z-10 mt-4 flex items-center justify-between border-t border-white/10 pt-4 text-sm text-slate-300"><span>첨부 이미지 {project.files}장</span><div className="relative ml-auto flex min-w-[128px] items-center justify-end pr-9"><button type="button" onClick={(event) => { event.stopPropagation(); openProject(project); const docs = (project.storedFiles || []).filter((file) => file.isDocument); if (!docs.length) return; if (docs.length === 1) return downloadAttachment(docs[0]); return }} className={`rounded-full px-3 py-1 text-right text-sm transition ${project.docs ? 'text-[#BFDBFE] hover:bg-[#4F7CFF]/10 hover:text-white' : 'cursor-default text-slate-400'}`}>첨부파일 {project.docs || 0}개</button><button type="button" onClick={(event) => { event.stopPropagation(); deleteProject(project.title) }} className="absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/0 opacity-0 transition group-hover:text-white/60 group-hover:opacity-100 hover:border-red-400/40 hover:bg-red-500/15 hover:text-red-200">×</button></div></div>
+                  <div className="relative z-10 mt-4 flex items-center justify-between border-t border-white/10 pt-4 text-sm text-slate-300"><span>첨부 이미지 {project.files}장</span><div className="relative ml-auto flex min-w-[128px] items-center justify-end pr-9"><button type="button" onClick={(event) => { event.stopPropagation(); openProject(project); const docs = (project.storedFiles || []).filter((file) => file.isDocument); if (!docs.length) return; if (docs.length === 1) return downloadAttachment(docs[0]); return }} className={`rounded-full px-3 py-1 text-right text-sm transition ${project.docs ? 'text-[#BFDBFE] hover:bg-[#4F7CFF]/10 hover:text-white' : 'cursor-default text-slate-400'}`}>첨부파일 {project.docs || 0}개</button>{canDeleteProject(project) && <button type="button" onClick={(event) => { event.stopPropagation(); deleteProject(project.title) }} className="absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/0 opacity-0 transition group-hover:text-white/60 group-hover:opacity-100 hover:border-red-400/40 hover:bg-red-500/15 hover:text-red-200">×</button>}</div></div>
                 </div>
               ))
             )}
@@ -1788,7 +1853,7 @@ function DesignReviewPlatform() {
                 <div className="preview-toolbar-wrap absolute left-1/2 top-[-80px] z-30 flex w-max max-w-[calc(100%-48px)] -translate-x-1/2 justify-center">{renderToolbar()}</div>
                 {renderImageCanvas(false)}
                 {quickUploadDraft && <div className="mx-auto mt-3 flex w-[1160px] max-w-[calc(100vw-560px)] flex-wrap items-center justify-center gap-3 rounded-2xl border border-[#4F7CFF]/25 bg-[#4F7CFF]/10 px-4 py-3 text-xs text-slate-200"><span className="font-medium text-white">{quickUploadDraft.title}</span><span className="text-slate-400">작업자</span><select value={currentUser} onChange={(event) => setCurrentUser(event.target.value)} className="rounded-xl border border-white/10 bg-[#0F172A] px-3 py-2 text-xs text-white outline-none">{teamMembers.map((member) => <option key={member} value={member}>{member}</option>)}</select><span className="text-slate-400">컨펌자</span><select value={quickUploadReviewer} onChange={(event) => setQuickUploadReviewer(event.target.value)} className="rounded-xl border border-white/10 bg-[#0F172A] px-3 py-2 text-xs text-white outline-none">{teamMembers.map((member) => <option key={member} value={member}>{member}</option>)}</select><label className="flex cursor-pointer items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-100"><input type="checkbox" checked={quickUploadTodayDeadline} onChange={(event) => setQuickUploadTodayDeadline(event.target.checked)} className="sr-only" /><span className={`flex h-5 w-5 items-center justify-center rounded-md border transition ${quickUploadTodayDeadline ? 'border-red-300 bg-red-500/70 text-white' : 'border-white/20 bg-white/[0.06] text-transparent'}`}>✓</span><span>오늘 마감</span></label><button type="button" onClick={registerQuickUploadProject} className="rounded-xl bg-[#4F7CFF] px-4 py-2 text-xs font-medium text-white hover:bg-[#3B68EB]">등록</button><button type="button" onClick={() => { setQuickUploadDraft(null); setQuickUploadTodayDeadline(false); setUploadedFiles([]); setCurrentImageIndex(0) }} className="rounded-xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs text-white/70 hover:bg-white/[0.1]">취소</button></div>}
-                {visibleImages.length > 0 && <div className="mx-auto mt-3 w-[1160px] max-w-[calc(100vw-560px)] rounded-xl border border-white/10 bg-black/20 px-4 py-4 text-center text-xs text-slate-300"><div className="flex min-h-[22px] items-center justify-center gap-2"><p className="truncate">{currentImageIndex + 1} / {visibleImages.length} · {currentFile?.name}</p><span className={`min-w-[58px] rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200 ${revisionCompletedFiles[currentKey] ? 'opacity-100' : 'opacity-0'}`}>수정없음</span></div><p className="mt-1 text-slate-400">{currentFile?.width && currentFile?.height ? `${currentFile.width}×${currentFile.height}px` : '해상도 미확인'} · {formatFileSize(currentFile?.size)}</p>{visibleImages.length > 1 && <div className="mt-2 flex flex-wrap justify-center gap-1.5">{visibleImages.map((file, index) => { const fileKey = getFileKey(file, index); const isDone = revisionCompletedFiles[fileKey]; return <button key={fileKey} type="button" onClick={() => selectImageIndex(index)} className={`min-w-[28px] rounded-full border px-2 py-1 text-[10px] font-medium ${index === currentImageIndex ? 'border-[#4F7CFF]/60 bg-[#4F7CFF]/20 text-[#BFDBFE]' : isDone ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200' : file.revisionRequested ? 'border-amber-400/35 bg-amber-500/15 text-amber-200' : 'border-white/10 bg-white/[0.04] text-slate-400'}`}>{index + 1}{file.revisionRequested ? ' !' : isDone ? ' ✓' : ''}</button> })}</div>}{uploadedDocs.length > 0 && <div className="mt-3 border-t border-white/10 pt-3"><p className="mb-2 text-[11px] font-medium text-slate-400">첨부 문서</p><div className="flex flex-wrap justify-center gap-2">{uploadedDocs.map((file) => <div key={file.id || file.name} className="group/doc flex max-w-[260px] items-center overflow-hidden rounded-full border border-white/10 bg-white/[0.06] text-[11px] text-[#BFDBFE] hover:border-[#4F7CFF]/50 hover:bg-[#4F7CFF]/10"><button type="button" onClick={() => downloadAttachment(file)} className="min-w-0 flex-1 truncate px-3 py-1.5 text-left">📎 {file.name}</button><button type="button" onClick={(event) => { event.stopPropagation(); deleteAttachment(file) }} className="mr-1 flex h-6 w-6 items-center justify-center rounded-full text-white/45 hover:bg-red-500/20 hover:text-red-200">×</button></div>)}</div></div>}</div>}
+                {visibleImages.length > 0 && <div className="mx-auto mt-3 w-[1160px] max-w-[calc(100vw-560px)] rounded-xl border border-white/10 bg-black/20 px-4 py-4 text-center text-xs text-slate-300"><div className="flex min-h-[22px] items-center justify-center gap-2"><p className="truncate">{currentImageIndex + 1} / {visibleImages.length} · {currentFile?.name}</p><span className={`min-w-[58px] rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200 ${revisionCompletedFiles[currentKey] ? 'opacity-100' : 'opacity-0'}`}>수정없음</span></div><p className="mt-1 text-slate-400">{currentFile?.width && currentFile?.height ? `${currentFile.width}×${currentFile.height}px` : '해상도 미확인'} · {formatFileSize(currentFile?.size)}</p>{visibleImages.length > 1 && <div className="mt-2 flex flex-wrap justify-center gap-1.5">{visibleImages.map((file, index) => { const fileKey = getFileKey(file, index); const isDone = revisionCompletedFiles[fileKey]; return <button key={fileKey} type="button" onClick={() => selectImageIndex(index)} className={`min-w-[28px] rounded-full border px-2 py-1 text-[10px] font-medium ${index === currentImageIndex ? 'border-[#4F7CFF]/60 bg-[#4F7CFF]/20 text-[#BFDBFE]' : isDone ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200' : file.revisionRequested ? 'border-amber-400/35 bg-amber-500/15 text-amber-200' : 'border-white/10 bg-white/[0.04] text-slate-400'}`}>{index + 1}{file.revisionRequested ? ' !' : isDone ? ' ✓' : ''}</button> })}</div>}{uploadedDocs.length > 0 && <div className="mt-3 border-t border-white/10 pt-3"><p className="mb-2 text-[11px] font-medium text-slate-400">첨부 문서</p><div className="flex flex-wrap justify-center gap-2">{uploadedDocs.map((file) => <div key={file.id || file.name} className="group/doc flex max-w-[260px] items-center overflow-hidden rounded-full border border-white/10 bg-white/[0.06] text-[11px] text-[#BFDBFE] hover:border-[#4F7CFF]/50 hover:bg-[#4F7CFF]/10"><button type="button" onClick={() => downloadAttachment(file)} className="min-w-0 flex-1 truncate px-3 py-1.5 text-left">📎 {file.name}</button>{canEditSelectedProject && <button type="button" onClick={(event) => { event.stopPropagation(); deleteAttachment(file) }} className="mr-1 flex h-6 w-6 items-center justify-center rounded-full text-white/45 hover:bg-red-500/20 hover:text-red-200">×</button>}</div>)}</div></div>}</div>}
                 {!isFullscreenPreviewOpen && <><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); moveImage(-1) }} className="preview-canvas-side-arrow absolute left-4 z-[45] h-12 w-12 -translate-y-1/2 rounded-full border border-white/10 bg-black/50 hover:border-[#4F7CFF]">←</button><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); moveImage(1) }} className="preview-canvas-side-arrow absolute right-4 z-[45] h-12 w-12 -translate-y-1/2 rounded-full border border-white/10 bg-black/50 hover:border-[#4F7CFF]">→</button></>}
               </div>
             </div>
