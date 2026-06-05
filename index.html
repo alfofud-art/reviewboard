@@ -52,12 +52,18 @@ const supabaseClient = isSupabaseConfigured() && window.supabase
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null
 
+const SESSION_LOCAL_ONLY_KEYS = new Set([
+  STORAGE_KEYS.currentUser,
+  STORAGE_KEYS.adminAuthenticatedUser,
+])
+
 let remoteSaveTimer = null
 let remoteSavePayload = null
 
 const getLocalWorkspaceState = () => {
   const state = {}
   Object.values(STORAGE_KEYS).forEach((key) => {
+    if (SESSION_LOCAL_ONLY_KEYS.has(key)) return
     try {
       const value = window.localStorage.getItem(key)
       if (value !== null) state[key] = JSON.parse(value)
@@ -71,6 +77,7 @@ const getLocalWorkspaceState = () => {
 const applyRemoteWorkspaceState = (state) => {
   if (!state || typeof state !== 'object') return
   Object.entries(state).forEach(([key, value]) => {
+    if (SESSION_LOCAL_ONLY_KEYS.has(key)) return
     try {
       window.localStorage.setItem(key, JSON.stringify(value))
     } catch {
@@ -128,6 +135,31 @@ const loadWorkspaceFromSupabase = async () => {
     console.warn('Supabase 연결 실패:', error)
     return false
   }
+}
+
+
+const subscribeWorkspaceRealtime = (onRemoteChange) => {
+  if (!supabaseClient) return null
+
+  return supabaseClient
+    .channel('reviewboard-workspace-realtime')
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'reviewboard_workspace_state',
+        filter: `id=eq.${WORKSPACE_ID}`,
+      },
+      (payload) => {
+        const nextState = payload.new?.state
+        if (!nextState) return
+
+        applyRemoteWorkspaceState(nextState)
+        onRemoteChange?.()
+      }
+    )
+    .subscribe()
 }
 
 const DEFAULT_MEMBERS = ['이지혜', '김OO 과장', '박OO', '최OO 팀장', '엄OO 과장', '정OO']
@@ -224,8 +256,11 @@ const loadStorage = (key, fallback) => {
 
 const saveStorage = (key, value) => {
   try {
-    window.localStorage.setItem(key, JSON.stringify(value))
-    queueWorkspaceSave()
+    const serialized = JSON.stringify(value)
+    const previous = window.localStorage.getItem(key)
+    if (previous === serialized) return
+    window.localStorage.setItem(key, serialized)
+    if (!SESSION_LOCAL_ONLY_KEYS.has(key)) queueWorkspaceSave()
   } catch {
     // 저장공간 부족 시 앱 중단 방지
   }
@@ -314,7 +349,6 @@ const normalizeProjects = (projects) => {
 function DesignReviewPlatform() {
   const fileInputRef = useRef(null)
   const revisionInputRef = useRef(null)
-  const isApplyingRemoteRef = useRef(false)
 
   const [teamMembers, setTeamMembers] = useState(() => loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
   const [teamMemberColors, setTeamMemberColors] = useState(() => loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
@@ -375,15 +409,10 @@ function DesignReviewPlatform() {
 
 
   useEffect(() => {
-    const hydrateSharedWorkspace = async () => {
-      const loaded = await loadWorkspaceFromSupabase()
-      if (!loaded) return
-
+    const refreshFromLocalStorage = () => {
       setTeamMembers(loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
       setTeamMemberColors(loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
       setProjects(normalizeProjects(loadStorage(STORAGE_KEYS.projects, DEFAULT_PROJECTS)))
-      setCurrentUser(loadStorage(STORAGE_KEYS.currentUser, '이지혜'))
-      setAdminAuthenticatedUser(loadStorage(STORAGE_KEYS.adminAuthenticatedUser, ''))
       setDrawings(loadStorage(STORAGE_KEYS.drawings, {}))
       setComments(loadStorage(STORAGE_KEYS.comments, {}))
       setViewStates(loadStorage(STORAGE_KEYS.viewStates, {}))
@@ -391,53 +420,20 @@ function DesignReviewPlatform() {
       setNotifications(loadStorage(STORAGE_KEYS.notifications, []))
     }
 
-    hydrateSharedWorkspace()
-  }, [])
-
-  useEffect(() => {
-    if (!supabaseClient) return undefined
-
-    const applyIncomingWorkspaceState = (state) => {
-      if (!state || typeof state !== 'object') return
-
-      isApplyingRemoteRef.current = true
-      applyRemoteWorkspaceState(state)
-
-      setTeamMembers(state[STORAGE_KEYS.teamMembers] || DEFAULT_MEMBERS)
-      setTeamMemberColors(state[STORAGE_KEYS.teamMemberColors] || DEFAULT_MEMBER_COLORS)
-      setProjects(normalizeProjects(state[STORAGE_KEYS.projects] || DEFAULT_PROJECTS))
-      setDrawings(state[STORAGE_KEYS.drawings] || {})
-      setComments(state[STORAGE_KEYS.comments] || {})
-      setViewStates(state[STORAGE_KEYS.viewStates] || {})
-      setRevisionCompletedFiles(state[STORAGE_KEYS.revisionCompletedFiles] || {})
-      setNotifications(state[STORAGE_KEYS.notifications] || [])
-
-      window.setTimeout(() => {
-        isApplyingRemoteRef.current = false
-      }, 0)
+    const hydrateSharedWorkspace = async () => {
+      const loaded = await loadWorkspaceFromSupabase()
+      if (loaded) refreshFromLocalStorage()
     }
 
-    const channel = supabaseClient
-      .channel(`reviewboard-workspace-state-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'reviewboard_workspace_state',
-          filter: `id=eq.${WORKSPACE_ID}`,
-        },
-        (payload) => {
-          const nextState = payload?.new?.state
-          if (nextState) applyIncomingWorkspaceState(nextState)
-        }
-      )
-      .subscribe((status) => {
-        if (status === 'SUBSCRIBED') console.log('Supabase Realtime 연결됨')
-      })
+    hydrateSharedWorkspace()
+
+    const channel = subscribeWorkspaceRealtime(() => {
+      refreshFromLocalStorage()
+      setNotice('다른 사용자의 변경사항이 실시간 반영되었습니다.')
+    })
 
     return () => {
-      supabaseClient.removeChannel(channel)
+      if (channel && supabaseClient) supabaseClient.removeChannel(channel)
     }
   }, [])
 
@@ -445,6 +441,8 @@ function DesignReviewPlatform() {
   const adminMembers = teamMembers.filter((member) => (teamMemberColors[member] || 'worker') === 'admin')
   const isAdminSession = Boolean(adminAuthenticatedUser && (teamMemberColors[adminAuthenticatedUser] || 'worker') === 'admin')
   const selectedProject = projects.find((project) => project.title === selectedProjectTitle)
+  const canDeleteProject = (project) => Boolean(project && adminAuthenticatedUser && (isAdminSession || project.owner === adminAuthenticatedUser))
+  const canDeleteSelectedProject = canDeleteProject(selectedProject)
   const isAssignedReviewProject = Boolean(isAdminSession && selectedProject?.reviewer === adminAuthenticatedUser)
   const uploadedImages = uploadedFiles.filter((file) => !file.isDocument)
   const uploadedDocs = uploadedFiles.filter((file) => file.isDocument)
@@ -501,21 +499,16 @@ function DesignReviewPlatform() {
   const totalProjectPages = Math.max(1, Math.ceil(filteredProjects.length / PROJECTS_PER_PAGE))
   const pagedProjects = filteredProjects.slice((projectPage - 1) * PROJECTS_PER_PAGE, projectPage * PROJECTS_PER_PAGE)
 
-  const saveSharedStorage = (key, value) => {
-    if (isApplyingRemoteRef.current) return
-    saveStorage(key, value)
-  }
-
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.teamMembers, teamMembers), [teamMembers])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.teamMemberColors, teamMemberColors), [teamMemberColors])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.projects, projects), [projects])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.currentUser, currentUser), [currentUser])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.adminAuthenticatedUser, adminAuthenticatedUser), [adminAuthenticatedUser])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.drawings, drawings), [drawings])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.comments, comments), [comments])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.viewStates, viewStates), [viewStates])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.revisionCompletedFiles, revisionCompletedFiles), [revisionCompletedFiles])
-  useEffect(() => saveSharedStorage(STORAGE_KEYS.notifications, notifications), [notifications])
+  useEffect(() => saveStorage(STORAGE_KEYS.teamMembers, teamMembers), [teamMembers])
+  useEffect(() => saveStorage(STORAGE_KEYS.teamMemberColors, teamMemberColors), [teamMemberColors])
+  useEffect(() => saveStorage(STORAGE_KEYS.projects, projects), [projects])
+  useEffect(() => saveStorage(STORAGE_KEYS.currentUser, currentUser), [currentUser])
+  useEffect(() => saveStorage(STORAGE_KEYS.adminAuthenticatedUser, adminAuthenticatedUser), [adminAuthenticatedUser])
+  useEffect(() => saveStorage(STORAGE_KEYS.drawings, drawings), [drawings])
+  useEffect(() => saveStorage(STORAGE_KEYS.comments, comments), [comments])
+  useEffect(() => saveStorage(STORAGE_KEYS.viewStates, viewStates), [viewStates])
+  useEffect(() => saveStorage(STORAGE_KEYS.revisionCompletedFiles, revisionCompletedFiles), [revisionCompletedFiles])
+  useEffect(() => saveStorage(STORAGE_KEYS.notifications, notifications), [notifications])
 
   useEffect(() => {
     setProjectPage(1)
@@ -538,13 +531,8 @@ function DesignReviewPlatform() {
 
   useEffect(() => {
     const project = projects.find((item) => item.title === selectedProjectTitle)
-    if (project?.storedFiles?.length) {
-      setUploadedFiles(project.storedFiles)
-      const imageFiles = project.storedFiles.filter((file) => !file.isDocument)
-      const nextVisibleImages = project.status === '수정요청' ? imageFiles.filter((file) => file.revisionRequested) : imageFiles
-      if (currentImageIndex >= nextVisibleImages.length) setCurrentImageIndex(0)
-    }
-  }, [projects, selectedProjectTitle])
+    if (project?.storedFiles?.length) setUploadedFiles(project.storedFiles)
+  }, [])
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1104,6 +1092,8 @@ function DesignReviewPlatform() {
   }
 
   const deleteProject = (title) => {
+    const targetProject = projects.find((project) => project.title === title)
+    if (!canDeleteProject(targetProject)) return setNotice('삭제 권한이 없습니다. 등록한 본인 카드 또는 관리자만 삭제할 수 있습니다.')
     setProjects((prev) => prev.filter((project) => project.title !== title))
     if (selectedProjectTitle === title) {
       setSelectedProjectTitle('')
@@ -1114,6 +1104,7 @@ function DesignReviewPlatform() {
   }
 
   const deleteCurrentFile = () => {
+    if (!canDeleteSelectedProject) return setNotice('삭제 권한이 없습니다. 등록한 본인 카드 또는 관리자만 삭제할 수 있습니다.')
     if (!currentFile) return
     const nextFiles = uploadedFiles.filter((file) => file.id !== currentFile.id)
     setUploadedFiles(nextFiles)
@@ -1295,6 +1286,7 @@ function DesignReviewPlatform() {
   }
 
   const deleteAttachment = async (targetFile) => {
+    if (!canDeleteSelectedProject) return setNotice('삭제 권한이 없습니다. 등록한 본인 카드 또는 관리자만 삭제할 수 있습니다.')
     if (!targetFile) return
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
@@ -1383,7 +1375,7 @@ function DesignReviewPlatform() {
         <button type="button" onClick={zoomIn} className="h-9 rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]">＋</button>
         <button type="button" onClick={resetView} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]"><span className="responsive-tool-text">초기화</span><span className="hidden max-[1720px]:inline">⌂</span></button>
         <button type="button" onClick={downloadCurrentReviewImage} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-white/10 bg-[#1E293B] px-3 hover:border-[#4F7CFF]"><span className="responsive-tool-text">다운로드</span><span className="hidden max-[1720px]:inline">↓</span></button>
-        <button type="button" onClick={deleteCurrentFile} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-red-300 hover:bg-red-500/20"><span className="responsive-tool-text">이미지 삭제</span><span className="hidden max-[1720px]:inline">🗑️</span></button>
+        {canDeleteSelectedProject && <button type="button" onClick={deleteCurrentFile} className="responsive-tool-button flex h-9 items-center justify-center rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-red-300 hover:bg-red-500/20"><span className="responsive-tool-text">이미지 삭제</span><span className="hidden max-[1720px]:inline">🗑️</span></button>}
       </div>
     )
   }
@@ -1701,7 +1693,7 @@ function DesignReviewPlatform() {
                   <div className="relative z-10 flex items-start justify-between gap-4"><div className="min-w-0"><div className="mb-2 flex min-h-[48px] items-start gap-2"><span>{isAdminSession ? '🔓' : '🔒'}</span><h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-6">{project.title}</h3></div><div className="space-y-1 text-sm text-slate-300"><p>작업자: {project.owner}</p><p>컨펌: {project.reviewer}</p></div></div><div className="flex shrink-0 flex-col items-end gap-2">{project.deadline === todayString() && <span className="inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full border border-red-400/50 bg-red-500/20 px-3 text-xs font-semibold text-red-100">오늘마감</span>}{project.reviewer === currentUser && <span className="inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full border border-[#8AB4FF]/55 bg-[#4F7CFF]/18 px-3 text-xs font-semibold text-[#DBEAFE]">담당 컨펌</span>}<span className={`inline-flex h-[28px] min-w-[88px] items-center justify-center rounded-full px-3 text-xs font-semibold ${statusBadgeClass(project.status)}`}>{project.status}</span></div></div>
                   {project.description && <p className="relative z-10 mt-4 line-clamp-2 text-xs text-white/70">{project.description}</p>}
                   {project.mailLink && <a href={normalizeMailLink(project.mailLink)} target="_blank" rel="noopener noreferrer" onClick={(event) => openMailLink(event, project.mailLink)} className="relative z-10 mt-3 block truncate text-xs text-[#93C5FD] hover:underline">메일 링크 열기</a>}
-                  <div className="relative z-10 mt-4 flex items-center justify-between border-t border-white/10 pt-4 text-sm text-slate-300"><span>첨부 이미지 {project.files}장</span><div className="relative ml-auto flex min-w-[128px] items-center justify-end pr-9"><button type="button" onClick={(event) => { event.stopPropagation(); openProject(project); const docs = (project.storedFiles || []).filter((file) => file.isDocument); if (!docs.length) return; if (docs.length === 1) return downloadAttachment(docs[0]); return }} className={`rounded-full px-3 py-1 text-right text-sm transition ${project.docs ? 'text-[#BFDBFE] hover:bg-[#4F7CFF]/10 hover:text-white' : 'cursor-default text-slate-400'}`}>첨부파일 {project.docs || 0}개</button><button type="button" onClick={(event) => { event.stopPropagation(); deleteProject(project.title) }} className="absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/0 opacity-0 transition group-hover:text-white/60 group-hover:opacity-100 hover:border-red-400/40 hover:bg-red-500/15 hover:text-red-200">×</button></div></div>
+                  <div className="relative z-10 mt-4 flex items-center justify-between border-t border-white/10 pt-4 text-sm text-slate-300"><span>첨부 이미지 {project.files}장</span><div className="relative ml-auto flex min-w-[128px] items-center justify-end pr-9"><button type="button" onClick={(event) => { event.stopPropagation(); openProject(project); const docs = (project.storedFiles || []).filter((file) => file.isDocument); if (!docs.length) return; if (docs.length === 1) return downloadAttachment(docs[0]); return }} className={`rounded-full px-3 py-1 text-right text-sm transition ${project.docs ? 'text-[#BFDBFE] hover:bg-[#4F7CFF]/10 hover:text-white' : 'cursor-default text-slate-400'}`}>첨부파일 {project.docs || 0}개</button>{canDeleteProject(project) && <button type="button" onClick={(event) => { event.stopPropagation(); deleteProject(project.title) }} className="absolute right-0 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-white/0 opacity-0 transition group-hover:text-white/60 group-hover:opacity-100 hover:border-red-400/40 hover:bg-red-500/15 hover:text-red-200">×</button>}</div></div>
                 </div>
               ))
             )}
@@ -1715,7 +1707,7 @@ function DesignReviewPlatform() {
                 <div className="preview-toolbar-wrap absolute left-1/2 top-[-80px] z-30 flex w-max max-w-[calc(100%-48px)] -translate-x-1/2 justify-center">{renderToolbar()}</div>
                 {renderImageCanvas(false)}
                 {quickUploadDraft && <div className="mx-auto mt-3 flex w-[1160px] max-w-[calc(100vw-560px)] flex-wrap items-center justify-center gap-3 rounded-2xl border border-[#4F7CFF]/25 bg-[#4F7CFF]/10 px-4 py-3 text-xs text-slate-200"><span className="font-medium text-white">{quickUploadDraft.title}</span><span className="text-slate-400">작업자</span><select value={currentUser} onChange={(event) => setCurrentUser(event.target.value)} className="rounded-xl border border-white/10 bg-[#0F172A] px-3 py-2 text-xs text-white outline-none">{teamMembers.map((member) => <option key={member} value={member}>{member}</option>)}</select><span className="text-slate-400">컨펌자</span><select value={quickUploadReviewer} onChange={(event) => setQuickUploadReviewer(event.target.value)} className="rounded-xl border border-white/10 bg-[#0F172A] px-3 py-2 text-xs text-white outline-none">{teamMembers.map((member) => <option key={member} value={member}>{member}</option>)}</select><label className="flex cursor-pointer items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 px-3 py-2 text-xs font-medium text-red-100"><input type="checkbox" checked={quickUploadTodayDeadline} onChange={(event) => setQuickUploadTodayDeadline(event.target.checked)} className="sr-only" /><span className={`flex h-5 w-5 items-center justify-center rounded-md border transition ${quickUploadTodayDeadline ? 'border-red-300 bg-red-500/70 text-white' : 'border-white/20 bg-white/[0.06] text-transparent'}`}>✓</span><span>오늘 마감</span></label><button type="button" onClick={registerQuickUploadProject} className="rounded-xl bg-[#4F7CFF] px-4 py-2 text-xs font-medium text-white hover:bg-[#3B68EB]">등록</button><button type="button" onClick={() => { setQuickUploadDraft(null); setQuickUploadTodayDeadline(false); setUploadedFiles([]); setCurrentImageIndex(0) }} className="rounded-xl border border-white/10 bg-white/[0.06] px-4 py-2 text-xs text-white/70 hover:bg-white/[0.1]">취소</button></div>}
-                {visibleImages.length > 0 && <div className="mx-auto mt-3 w-[1160px] max-w-[calc(100vw-560px)] rounded-xl border border-white/10 bg-black/20 px-4 py-4 text-center text-xs text-slate-300"><div className="flex min-h-[22px] items-center justify-center gap-2"><p className="truncate">{currentImageIndex + 1} / {visibleImages.length} · {currentFile?.name}</p><span className={`min-w-[58px] rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200 ${revisionCompletedFiles[currentKey] ? 'opacity-100' : 'opacity-0'}`}>수정없음</span></div><p className="mt-1 text-slate-400">{currentFile?.width && currentFile?.height ? `${currentFile.width}×${currentFile.height}px` : '해상도 미확인'} · {formatFileSize(currentFile?.size)}</p>{visibleImages.length > 1 && <div className="mt-2 flex flex-wrap justify-center gap-1.5">{visibleImages.map((file, index) => { const fileKey = getFileKey(file, index); const isDone = revisionCompletedFiles[fileKey]; return <button key={fileKey} type="button" onClick={() => selectImageIndex(index)} className={`min-w-[28px] rounded-full border px-2 py-1 text-[10px] font-medium ${index === currentImageIndex ? 'border-[#4F7CFF]/60 bg-[#4F7CFF]/20 text-[#BFDBFE]' : isDone ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200' : file.revisionRequested ? 'border-amber-400/35 bg-amber-500/15 text-amber-200' : 'border-white/10 bg-white/[0.04] text-slate-400'}`}>{index + 1}{file.revisionRequested ? ' !' : isDone ? ' ✓' : ''}</button> })}</div>}{uploadedDocs.length > 0 && <div className="mt-3 border-t border-white/10 pt-3"><p className="mb-2 text-[11px] font-medium text-slate-400">첨부 문서</p><div className="flex flex-wrap justify-center gap-2">{uploadedDocs.map((file) => <div key={file.id || file.name} className="group/doc flex max-w-[260px] items-center overflow-hidden rounded-full border border-white/10 bg-white/[0.06] text-[11px] text-[#BFDBFE] hover:border-[#4F7CFF]/50 hover:bg-[#4F7CFF]/10"><button type="button" onClick={() => downloadAttachment(file)} className="min-w-0 flex-1 truncate px-3 py-1.5 text-left">📎 {file.name}</button><button type="button" onClick={(event) => { event.stopPropagation(); deleteAttachment(file) }} className="mr-1 flex h-6 w-6 items-center justify-center rounded-full text-white/45 hover:bg-red-500/20 hover:text-red-200">×</button></div>)}</div></div>}</div>}
+                {visibleImages.length > 0 && <div className="mx-auto mt-3 w-[1160px] max-w-[calc(100vw-560px)] rounded-xl border border-white/10 bg-black/20 px-4 py-4 text-center text-xs text-slate-300"><div className="flex min-h-[22px] items-center justify-center gap-2"><p className="truncate">{currentImageIndex + 1} / {visibleImages.length} · {currentFile?.name}</p><span className={`min-w-[58px] rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-200 ${revisionCompletedFiles[currentKey] ? 'opacity-100' : 'opacity-0'}`}>수정없음</span></div><p className="mt-1 text-slate-400">{currentFile?.width && currentFile?.height ? `${currentFile.width}×${currentFile.height}px` : '해상도 미확인'} · {formatFileSize(currentFile?.size)}</p>{visibleImages.length > 1 && <div className="mt-2 flex flex-wrap justify-center gap-1.5">{visibleImages.map((file, index) => { const fileKey = getFileKey(file, index); const isDone = revisionCompletedFiles[fileKey]; return <button key={fileKey} type="button" onClick={() => selectImageIndex(index)} className={`min-w-[28px] rounded-full border px-2 py-1 text-[10px] font-medium ${index === currentImageIndex ? 'border-[#4F7CFF]/60 bg-[#4F7CFF]/20 text-[#BFDBFE]' : isDone ? 'border-emerald-400/30 bg-emerald-500/15 text-emerald-200' : file.revisionRequested ? 'border-amber-400/35 bg-amber-500/15 text-amber-200' : 'border-white/10 bg-white/[0.04] text-slate-400'}`}>{index + 1}{file.revisionRequested ? ' !' : isDone ? ' ✓' : ''}</button> })}</div>}{uploadedDocs.length > 0 && <div className="mt-3 border-t border-white/10 pt-3"><p className="mb-2 text-[11px] font-medium text-slate-400">첨부 문서</p><div className="flex flex-wrap justify-center gap-2">{uploadedDocs.map((file) => <div key={file.id || file.name} className="group/doc flex max-w-[260px] items-center overflow-hidden rounded-full border border-white/10 bg-white/[0.06] text-[11px] text-[#BFDBFE] hover:border-[#4F7CFF]/50 hover:bg-[#4F7CFF]/10"><button type="button" onClick={() => downloadAttachment(file)} className="min-w-0 flex-1 truncate px-3 py-1.5 text-left">📎 {file.name}</button>{canDeleteSelectedProject && <button type="button" onClick={(event) => { event.stopPropagation(); deleteAttachment(file) }} className="mr-1 flex h-6 w-6 items-center justify-center rounded-full text-white/45 hover:bg-red-500/20 hover:text-red-200">×</button>}</div>)}</div></div>}</div>}
                 {!isFullscreenPreviewOpen && <><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); moveImage(-1) }} className="preview-canvas-side-arrow absolute left-4 z-[45] h-12 w-12 -translate-y-1/2 rounded-full border border-white/10 bg-black/50 hover:border-[#4F7CFF]">←</button><button type="button" onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); moveImage(1) }} className="preview-canvas-side-arrow absolute right-4 z-[45] h-12 w-12 -translate-y-1/2 rounded-full border border-white/10 bg-black/50 hover:border-[#4F7CFF]">→</button></>}
               </div>
             </div>
