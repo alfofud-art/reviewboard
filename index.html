@@ -570,7 +570,10 @@ function DesignReviewPlatform() {
   const selectedProject = projects.find((project) => project.title === selectedProjectTitle)
   const canDeleteProject = (project) => Boolean(project && adminAuthenticatedUser && (isAdminSession || project.owner === adminAuthenticatedUser))
   const canDeleteSelectedProject = canDeleteProject(selectedProject)
-  const canUploadRevisionProject = (project) => Boolean(project && adminAuthenticatedUser && (project.owner === adminAuthenticatedUser || project.reviewer === adminAuthenticatedUser))
+  const canUploadRevisionProject = (project) => {
+    const activeUser = adminAuthenticatedUser || currentUser
+    return Boolean(project && activeUser && (project.owner === activeUser || project.reviewer === activeUser))
+  }
   const isAssignedReviewProject = Boolean(isAdminSession && selectedProject?.reviewer === adminAuthenticatedUser)
   const uploadedImages = uploadedFiles.filter((file) => !file.isDocument)
   const uploadedDocs = uploadedFiles.filter((file) => file.isDocument)
