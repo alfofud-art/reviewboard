@@ -440,6 +440,9 @@ const normalizeProjects = (projects) => {
 function DesignReviewPlatform() {
   const fileInputRef = useRef(null)
   const revisionInputRef = useRef(null)
+  const selectedProjectTitleRef = useRef('')
+  const selectedCardTitleRef = useRef('')
+  const currentImageIndexRef = useRef(0)
 
   const [teamMembers, setTeamMembers] = useState(() => loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
   const [teamMemberColors, setTeamMemberColors] = useState(() => loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
@@ -602,29 +605,45 @@ function DesignReviewPlatform() {
     setRevisionCompletedFiles(nextRevisionCompletedFiles)
     setNotifications(nextNotifications)
 
-    const stillExistsSelected = nextProjects.find((project) => project.title === selectedProjectTitle)
-    const stillExistsSelectedCard = nextProjects.find((project) => project.title === selectedCardTitle)
-    const nextSelectedProject = stillExistsSelected || (selectedProjectTitle ? nextProjects[0] : null)
+    const latestSelectedProjectTitle = selectedProjectTitleRef.current
+    const latestSelectedCardTitle = selectedCardTitleRef.current
+    const latestImageIndex = currentImageIndexRef.current
+
+    const stillExistsSelected = nextProjects.find((project) => project.title === latestSelectedProjectTitle)
+    const stillExistsSelectedCard = nextProjects.find((project) => project.title === latestSelectedCardTitle)
+    const nextSelectedProject = stillExistsSelected || (latestSelectedProjectTitle ? nextProjects[0] : null)
 
     if (nextSelectedProject) {
-      setSelectedProjectTitle(nextSelectedProject.title)
-      setUploadedFiles(nextSelectedProject.storedFiles || [])
+      const nextSelectedTitle = nextSelectedProject.title
+      const nextCardTitle = latestSelectedCardTitle
+        ? (stillExistsSelectedCard ? latestSelectedCardTitle : nextSelectedTitle)
+        : ''
 
-      if (selectedCardTitle) {
-        setSelectedCardTitle(stillExistsSelectedCard ? selectedCardTitle : nextSelectedProject.title)
-      }
+      setSelectedProjectTitle(nextSelectedTitle)
+      selectedProjectTitleRef.current = nextSelectedTitle
+
+      setSelectedCardTitle(nextCardTitle)
+      selectedCardTitleRef.current = nextCardTitle
+
+      setUploadedFiles(nextSelectedProject.storedFiles || [])
 
       const imageFiles = (nextSelectedProject.storedFiles || []).filter((file) => !file.isDocument)
       const nextVisibleImages = nextSelectedProject.status === '수정요청'
         ? imageFiles.filter((file) => file.revisionRequested)
         : imageFiles
 
-      if (currentImageIndex >= nextVisibleImages.length) setCurrentImageIndex(0)
+      if (latestImageIndex >= nextVisibleImages.length) {
+        setCurrentImageIndex(0)
+        currentImageIndexRef.current = 0
+      }
     } else {
       setSelectedProjectTitle('')
+      selectedProjectTitleRef.current = ''
       setSelectedCardTitle('')
+      selectedCardTitleRef.current = ''
       setUploadedFiles([])
       setCurrentImageIndex(0)
+      currentImageIndexRef.current = 0
     }
   }
 
@@ -701,6 +720,18 @@ function DesignReviewPlatform() {
   useEffect(() => saveStorage(STORAGE_KEYS.viewStates, viewStates), [viewStates])
   useEffect(() => saveStorage(STORAGE_KEYS.revisionCompletedFiles, revisionCompletedFiles), [revisionCompletedFiles])
   useEffect(() => saveStorage(STORAGE_KEYS.notifications, notifications), [notifications])
+
+  useEffect(() => {
+    selectedProjectTitleRef.current = selectedProjectTitle
+  }, [selectedProjectTitle])
+
+  useEffect(() => {
+    selectedCardTitleRef.current = selectedCardTitle
+  }, [selectedCardTitle])
+
+  useEffect(() => {
+    currentImageIndexRef.current = currentImageIndex
+  }, [currentImageIndex])
 
   useEffect(() => {
     setProjectPage(1)
@@ -1308,7 +1339,7 @@ function DesignReviewPlatform() {
   const applyRevisionUploadFiles = async (files) => {
     const targetProject = projects.find((project) => project.title === revisionUploadProjectTitle)
     if (!targetProject) return setNotice('수정본을 적용할 프로젝트를 찾을 수 없습니다.')
-    if (!canUploadRevisionProject(targetProject)) return setNotice('수정본은 작성자 또는 담당 컨펌자만 업로드할 수 있습니다.')
+    if (!canUploadRevisionProject(targetProject)) return setNotice('수정본은 해당 작업자 또는 해당 컨펌자만 업로드할 수 있습니다.')
     const validImages = Array.from(files || []).filter(isAllowedImageFile)
     if (!validImages.length) return setNotice('JPG 또는 PNG 수정본을 업로드해주세요.')
     const uploaded = await mapFiles(validImages)
