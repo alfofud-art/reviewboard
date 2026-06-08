@@ -743,11 +743,7 @@ function DesignReviewPlatform() {
 
   useEffect(() => {
     const handleOutsideProjectCardClick = (event) => {
-      if (
-        event.target.closest('[data-project-card="true"]') ||
-        event.target.closest('[data-keep-project-selection="true"]')
-      ) return
-
+      if (event.target.closest('[data-project-card="true"]')) return
       clearProjectSelectionToUploadPreview()
     }
 
