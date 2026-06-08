@@ -602,13 +602,23 @@ function DesignReviewPlatform() {
     setNotifications(nextNotifications)
 
     const stillExistsSelected = nextProjects.find((project) => project.title === selectedProjectTitle)
-    const nextSelectedProject = stillExistsSelected || nextProjects[0]
+    const stillExistsSelectedCard = nextProjects.find((project) => project.title === selectedCardTitle)
+    const nextSelectedProject = stillExistsSelected || (selectedProjectTitle ? nextProjects[0] : null)
 
     if (nextSelectedProject) {
       setSelectedProjectTitle(nextSelectedProject.title)
-      setSelectedCardTitle(nextSelectedProject.title)
       setUploadedFiles(nextSelectedProject.storedFiles || [])
-      setCurrentImageIndex(0)
+
+      if (selectedCardTitle) {
+        setSelectedCardTitle(stillExistsSelectedCard ? selectedCardTitle : nextSelectedProject.title)
+      }
+
+      const imageFiles = (nextSelectedProject.storedFiles || []).filter((file) => !file.isDocument)
+      const nextVisibleImages = nextSelectedProject.status === '수정요청'
+        ? imageFiles.filter((file) => file.revisionRequested)
+        : imageFiles
+
+      if (currentImageIndex >= nextVisibleImages.length) setCurrentImageIndex(0)
     } else {
       setSelectedProjectTitle('')
       setSelectedCardTitle('')
