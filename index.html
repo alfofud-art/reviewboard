@@ -443,8 +443,6 @@ function DesignReviewPlatform() {
   const selectedProjectTitleRef = useRef('')
   const selectedCardTitleRef = useRef('')
   const currentImageIndexRef = useRef(0)
-  const browserNotificationStartedRef = useRef(false)
-  const lastBrowserNotificationIdRef = useRef(null)
 
   const [teamMembers, setTeamMembers] = useState(() => loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
   const [teamMemberColors, setTeamMemberColors] = useState(() => loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
@@ -736,21 +734,6 @@ function DesignReviewPlatform() {
   }, [currentImageIndex])
 
   useEffect(() => {
-    const latest = notifications[0]
-
-    if (!browserNotificationStartedRef.current) {
-      browserNotificationStartedRef.current = true
-      lastBrowserNotificationIdRef.current = latest?.id || null
-      return
-    }
-
-    if (!latest?.id || lastBrowserNotificationIdRef.current === latest.id) return
-
-    lastBrowserNotificationIdRef.current = latest.id
-    showBrowserNotification(latest)
-  }, [notifications])
-
-  useEffect(() => {
     setProjectPage(1)
   }, [activeMenu, searchKeyword])
 
@@ -760,9 +743,12 @@ function DesignReviewPlatform() {
 
   useEffect(() => {
     const handleOutsideProjectCardClick = (event) => {
-      if (!event.target.closest('[data-project-card="true"]')) {
-        setSelectedCardTitle('')
-      }
+      if (
+        event.target.closest('[data-project-card="true"]') ||
+        event.target.closest('[data-keep-project-selection="true"]')
+      ) return
+
+      clearProjectSelectionToUploadPreview()
     }
 
     document.addEventListener('mousedown', handleOutsideProjectCardClick)
@@ -995,39 +981,6 @@ function DesignReviewPlatform() {
     )
   }
 
-  const showBrowserNotification = (noticeItem) => {
-    if (!noticeItem) return
-    if (!('Notification' in window)) return
-    if (Notification.permission !== 'granted') return
-
-    const targetProject = projects.find((project) => project.title === noticeItem.project)
-    const authenticatedUser = adminAuthenticatedUser || currentUser
-
-    // 내 업무와 관련 없는 알림은 띄우지 않는다.
-    if (targetProject && authenticatedUser && targetProject.owner !== authenticatedUser && targetProject.reviewer !== authenticatedUser) return
-
-    try {
-      const browserNotice = new Notification(noticeItem.title || 'ReviewBoard 알림', {
-        body: noticeItem.message || noticeItem.project || '새 알림이 도착했습니다.',
-        tag: String(noticeItem.id || noticeItem.createdAt || noticeItem.project || Date.now()),
-        renotify: false,
-        silent: false,
-      })
-
-      browserNotice.onclick = () => {
-        window.focus()
-        const target = projects.find((project) => project.title === noticeItem.project)
-        if (target) {
-          openProject(target)
-          setActiveMenu('전체 프로젝트')
-        }
-        browserNotice.close()
-      }
-    } catch (error) {
-      console.warn('브라우저 알림 표시 실패:', error)
-    }
-  }
-
   const saveCurrentView = (key = activeImageKey, next = {}) => {
     if (!key || key === 'empty') return
     setViewStates((prev) => ({ ...prev, [key]: { zoomLevel, pan, ...(prev[key] || {}), ...next } }))
@@ -1234,6 +1187,19 @@ function DesignReviewPlatform() {
     const rect = layer?.getBoundingClientRect()
     if (!rect) return
     setDraggingComment({ id: comment.id, key, startClientX: event.clientX, startClientY: event.clientY, startX: comment.x, startY: comment.y, rect })
+  }
+
+  const clearProjectSelectionToUploadPreview = () => {
+    setSelectedProjectTitle('')
+    setSelectedCardTitle('')
+    setUploadedFiles([])
+    setCurrentImageIndex(0)
+    setQuickUploadDraft(null)
+    setQuickUploadTodayDeadline(false)
+    setActiveTool('')
+    setPendingComment(null)
+    setActiveAnnotationKey(null)
+    resetView()
   }
 
   const openProject = (project) => {
@@ -1833,7 +1799,7 @@ function DesignReviewPlatform() {
   }
 
   const renderProjectModal = () => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div data-keep-project-selection="true" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="w-[760px] rounded-3xl border border-white/10 bg-[#1E293B] p-6 shadow-2xl">
         <div className="mb-6 flex items-start justify-between">
           <div>
@@ -1858,7 +1824,7 @@ function DesignReviewPlatform() {
   )
 
   const renderAdminLogin = () => isAdminLoginOpen && (
-    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+    <div data-keep-project-selection="true" className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div className="w-[420px] rounded-3xl border border-white/10 bg-[#111827] p-6 shadow-2xl">
         <p className="text-xs font-medium text-[#93C5FD]">사용자 인증</p>
         <h3 className="mt-2 text-lg font-semibold text-white">사용자 선택</h3>
@@ -1936,7 +1902,7 @@ function DesignReviewPlatform() {
       `}</style>
 
       {isFullscreenPreviewOpen && (
-        <div className="fixed inset-0 z-[70] flex flex-col bg-[#020617]/95 backdrop-blur-xl">
+        <div data-keep-project-selection="true" className="fixed inset-0 z-[70] flex flex-col bg-[#020617]/95 backdrop-blur-xl">
           <div className="flex h-[76px] items-center justify-between border-b border-white/10 bg-[#111827]/90 px-6">
             <div><p className="text-sm text-white/50">전체화면 리뷰</p><h3 className="text-lg font-semibold text-white">{selectedProject?.title || quickUploadDraft?.title || '프로젝트 미리보기'}</h3></div>
             <div className="absolute left-1/2 top-4 z-40 -translate-x-1/2">{renderToolbar()}</div>
@@ -1953,7 +1919,7 @@ function DesignReviewPlatform() {
       {isProjectModalOpen && renderProjectModal()}
       {renderAdminLogin()}
       {isNotificationPanelOpen && (
-        <div className="fixed right-6 top-[72px] z-[99999] w-[380px] overflow-hidden rounded-3xl border border-white/10 bg-[#111827] shadow-[0_24px_80px_rgba(0,0,0,0.75)]">
+        <div data-keep-project-selection="true" className="fixed right-6 top-[72px] z-[99999] w-[380px] overflow-hidden rounded-3xl border border-white/10 bg-[#111827] shadow-[0_24px_80px_rgba(0,0,0,0.75)]">
           <div className="flex items-center justify-between border-b border-white/10 bg-[#111827] px-5 py-4">
             <div>
               <p className="text-sm font-semibold text-white">알림</p>
@@ -1966,7 +1932,7 @@ function DesignReviewPlatform() {
       )}
 
       {revisionUploadProjectTitle && canUploadRevisionProject(projects.find((project) => project.title === revisionUploadProjectTitle)) && (
-        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/65 backdrop-blur-sm">
+        <div data-keep-project-selection="true" className="fixed inset-0 z-[75] flex items-center justify-center bg-black/65 backdrop-blur-sm">
           <div className="w-[520px] rounded-3xl border border-white/10 bg-[#111827] p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between"><div><p className="text-xs font-medium text-[#93C5FD]">수정본 업로드</p><h3 className="mt-2 text-xl font-semibold text-white">{revisionUploadProjectTitle}</h3><p className="mt-2 text-sm text-slate-300">수정요청된 이미지 순서대로 JPG/PNG를 첨부하면 BEFORE/AFTER가 연결됩니다.</p></div><button type="button" onClick={() => setRevisionUploadProjectTitle(null)} className="h-9 w-9 rounded-full border border-white/10 bg-white/[0.08]">×</button></div>
             <label className={`flex h-[220px] cursor-pointer flex-col items-center justify-center rounded-3xl border border-dashed p-6 text-center transition ${isRevisionDropActive ? 'border-[#4F7CFF] bg-[#4F7CFF]/12' : 'border-white/15 bg-white/[0.04] hover:border-[#4F7CFF]/60'}`} onDragOver={(event) => { event.preventDefault(); setIsRevisionDropActive(true) }} onDragLeave={() => setIsRevisionDropActive(false)} onDrop={(event) => { event.preventDefault(); setIsRevisionDropActive(false); applyRevisionUploadFiles(event.dataTransfer.files) }}>
@@ -2016,7 +1982,7 @@ function DesignReviewPlatform() {
         </header>
 
 
-        <div onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedCardTitle('') }} className={`review-layout-grid grid min-h-0 flex-1 gap-6 overflow-hidden p-6 ${activeMenu === '알림' ? 'grid-cols-[1fr]' : 'grid-cols-[420px_1fr]'}`}> 
+        <div onMouseDown={(event) => { if (event.target === event.currentTarget) clearProjectSelectionToUploadPreview() }} className={`review-layout-grid grid min-h-0 flex-1 gap-6 overflow-hidden p-6 ${activeMenu === '알림' ? 'grid-cols-[1fr]' : 'grid-cols-[420px_1fr]'}`}> 
           <section className={`project-list-scroll overflow-y-auto ${activeMenu === '알림' ? 'mx-auto w-full max-w-[860px] space-y-4' : 'space-y-4'}`}>
             <div className="flex items-center justify-between gap-3"><p className="text-sm text-slate-300">{activeMenu}</p><div className="flex items-center gap-2"><button type="button" onClick={() => setProjectSortMode((prev) => prev === 'latest' ? 'priority' : 'latest')} className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-[11px] font-medium text-[#BFDBFE] hover:border-[#4F7CFF]/50 hover:bg-[#4F7CFF]/10">{projectSortMode === 'latest' ? '최신순' : '우선순위순'}</button><p className="text-xs text-slate-400">{filteredProjects.length}건 · {projectPage}/{totalProjectPages}</p></div></div>
             {activeMenu === '알림' ? (
@@ -2055,7 +2021,7 @@ function DesignReviewPlatform() {
             {activeMenu !== '팀원 관리' && activeMenu !== '알림' && filteredProjects.length > PROJECTS_PER_PAGE && <div className="flex items-center justify-center gap-1 pt-1">{Array.from({ length: totalProjectPages }).map((_, index) => { const page = index + 1; return <button key={page} type="button" onClick={() => setProjectPage(page)} className={`h-8 min-w-8 rounded-full border px-2 text-xs font-medium transition ${projectPage === page ? 'border-[#4F7CFF]/60 bg-[#4F7CFF]/20 text-[#BFDBFE]' : 'border-white/10 bg-white/[0.04] text-slate-400 hover:bg-white/[0.08] hover:text-white'}`}>{page}</button> })}</div>}
           </section>
 
-          {activeMenu !== '알림' && <section onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedCardTitle('') }} className={`preview-panel-mobile relative flex min-h-0 flex-col overflow-hidden rounded-[36px] border bg-[#111827]/55 transition ${isPreviewDragActive ? 'border-[#4F7CFF]/70 shadow-[0_0_36px_rgba(79,124,255,0.22)]' : 'border-white/10'}`} onDragOver={(event) => { event.preventDefault(); setIsPreviewDragActive(true) }} onDragLeave={() => setIsPreviewDragActive(false)} onDrop={(event) => { event.preventDefault(); setIsPreviewDragActive(false); createQuickUploadDraft(event.dataTransfer.files) }}>
+          {activeMenu !== '알림' && <section data-keep-project-selection="true" className={`preview-panel-mobile relative flex min-h-0 flex-col overflow-hidden rounded-[36px] border bg-[#111827]/55 transition ${isPreviewDragActive ? 'border-[#4F7CFF]/70 shadow-[0_0_36px_rgba(79,124,255,0.22)]' : 'border-white/10'}`} onDragOver={(event) => { event.preventDefault(); setIsPreviewDragActive(true) }} onDragLeave={() => setIsPreviewDragActive(false)} onDrop={(event) => { event.preventDefault(); setIsPreviewDragActive(false); createQuickUploadDraft(event.dataTransfer.files) }}>
             <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,.ppt,.pptx,.pdf,.psd" className="hidden" onChange={async (event) => { const files = await mapFiles(event.target.files); setUploadedFiles(files); setCurrentImageIndex(0); setQuickUploadTodayDeadline(false); setQuickUploadDraft({ title: getBaseFileName(Array.from(event.target.files || [])[0]?.name), owner: currentUser, files }); event.target.value = '' }} />
             <div className="preview-scroll-area relative flex flex-1 items-start overflow-x-hidden overflow-y-hidden px-6 py-6">
               <div className="preview-stage relative mx-auto mt-14 text-center">
