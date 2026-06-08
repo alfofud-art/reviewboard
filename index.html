@@ -794,10 +794,11 @@ function DesignReviewPlatform() {
     if (!supabaseClient || !file) return null
 
     try {
-      const safeName = (file.name || 'file')
-        .replace(/[^a-zA-Z0-9가-힣._-]/g, '_')
-        .slice(0, 120)
-      const path = `${todayString()}/${id}-${safeName}`
+      const extension = (file.name || '').includes('.')
+        ? (file.name || '').split('.').pop().toLowerCase().replace(/[^a-z0-9]/g, '')
+        : ''
+      const storageFileName = `${Date.now()}-${Math.random().toString(36).slice(2)}${extension ? `.${extension}` : ''}`
+      const path = `${todayString()}/${storageFileName}`
 
       const { error } = await supabaseClient.storage
         .from(STORAGE_BUCKET)
@@ -815,6 +816,8 @@ function DesignReviewPlatform() {
       const { data } = supabaseClient.storage
         .from(STORAGE_BUCKET)
         .getPublicUrl(path)
+
+      console.log('Supabase Storage 업로드 완료:', path)
 
       return {
         path,
