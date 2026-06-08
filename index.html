@@ -443,6 +443,8 @@ function DesignReviewPlatform() {
   const selectedProjectTitleRef = useRef('')
   const selectedCardTitleRef = useRef('')
   const currentImageIndexRef = useRef(0)
+  const browserNotificationStartedRef = useRef(false)
+  const lastBrowserNotificationIdRef = useRef(null)
 
   const [teamMembers, setTeamMembers] = useState(() => loadStorage(STORAGE_KEYS.teamMembers, DEFAULT_MEMBERS))
   const [teamMemberColors, setTeamMemberColors] = useState(() => loadStorage(STORAGE_KEYS.teamMemberColors, DEFAULT_MEMBER_COLORS))
@@ -734,6 +736,21 @@ function DesignReviewPlatform() {
   }, [currentImageIndex])
 
   useEffect(() => {
+    const latest = notifications[0]
+
+    if (!browserNotificationStartedRef.current) {
+      browserNotificationStartedRef.current = true
+      lastBrowserNotificationIdRef.current = latest?.id || null
+      return
+    }
+
+    if (!latest?.id || lastBrowserNotificationIdRef.current === latest.id) return
+
+    lastBrowserNotificationIdRef.current = latest.id
+    showBrowserNotification(latest)
+  }, [notifications])
+
+  useEffect(() => {
     setProjectPage(1)
   }, [activeMenu, searchKeyword])
 
@@ -976,6 +993,39 @@ function DesignReviewPlatform() {
         })}
       </div>
     )
+  }
+
+  const showBrowserNotification = (noticeItem) => {
+    if (!noticeItem) return
+    if (!('Notification' in window)) return
+    if (Notification.permission !== 'granted') return
+
+    const targetProject = projects.find((project) => project.title === noticeItem.project)
+    const authenticatedUser = adminAuthenticatedUser || currentUser
+
+    // 내 업무와 관련 없는 알림은 띄우지 않는다.
+    if (targetProject && authenticatedUser && targetProject.owner !== authenticatedUser && targetProject.reviewer !== authenticatedUser) return
+
+    try {
+      const browserNotice = new Notification(noticeItem.title || 'ReviewBoard 알림', {
+        body: noticeItem.message || noticeItem.project || '새 알림이 도착했습니다.',
+        tag: String(noticeItem.id || noticeItem.createdAt || noticeItem.project || Date.now()),
+        renotify: false,
+        silent: false,
+      })
+
+      browserNotice.onclick = () => {
+        window.focus()
+        const target = projects.find((project) => project.title === noticeItem.project)
+        if (target) {
+          openProject(target)
+          setActiveMenu('전체 프로젝트')
+        }
+        browserNotice.close()
+      }
+    } catch (error) {
+      console.warn('브라우저 알림 표시 실패:', error)
+    }
   }
 
   const saveCurrentView = (key = activeImageKey, next = {}) => {
