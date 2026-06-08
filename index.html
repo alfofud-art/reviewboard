@@ -102,14 +102,72 @@ const applyRemoteWorkspaceState = (state) => {
   }, 800)
 }
 
+const stripHeavyFileData = (file) => {
+  if (!file || typeof file !== 'object') return file
+  const next = { ...file }
+  if (next.url?.startsWith?.('data:')) next.url = ''
+  if (next.beforeUrl?.startsWith?.('data:')) next.beforeUrl = ''
+  if (next.beforeFile && typeof next.beforeFile === 'object') next.beforeFile = stripHeavyFileData(next.beforeFile)
+  delete next.rawFile
+  return next
+}
+
+const stripHeavyProjectData = (project) => {
+  if (!project || typeof project !== 'object') return project
+  return {
+    ...project,
+    storedFiles: Array.isArray(project.storedFiles) ? project.storedFiles.map(stripHeavyFileData) : [],
+    revisionBeforeFiles: Array.isArray(project.revisionBeforeFiles) ? project.revisionBeforeFiles.map(stripHeavyFileData) : [],
+  }
+}
+
+const sanitizeWorkspaceForSupabase = (state) => {
+  const next = { ...(state || {}) }
+  if (Array.isArray(next[STORAGE_KEYS.projects])) next[STORAGE_KEYS.projects] = next[STORAGE_KEYS.projects].map(stripHeavyProjectData)
+  return next
+}
+
+const mergeRemoteFilesWithLocalFiles = (remoteFiles = [], localFiles = []) => {
+  const localById = new Map((Array.isArray(localFiles) ? localFiles : []).map((file) => [file.id, file]))
+  return (Array.isArray(remoteFiles) ? remoteFiles : []).map((remoteFile) => {
+    const localFile = localById.get(remoteFile.id)
+    if (!localFile) return remoteFile
+    const merged = { ...remoteFile, url: remoteFile.url || localFile.url || '', beforeUrl: remoteFile.beforeUrl || localFile.beforeUrl || '' }
+    if (remoteFile.beforeFile || localFile.beforeFile) {
+      merged.beforeFile = { ...(remoteFile.beforeFile || {}), ...(localFile.beforeFile || {}), url: remoteFile.beforeFile?.url || localFile.beforeFile?.url || '' }
+    }
+    return merged
+  })
+}
+
+const mergeRemoteProjectsWithLocalImages = (remoteProjects = []) => {
+  let localProjects = []
+  try { localProjects = JSON.parse(window.localStorage.getItem(STORAGE_KEYS.projects) || '[]') } catch {}
+  const localById = new Map()
+  localProjects.forEach((project) => {
+    if (project?.id) localById.set(project.id, project)
+    if (project?.title) localById.set(project.title, project)
+  })
+  return (Array.isArray(remoteProjects) ? remoteProjects : []).map((remoteProject) => {
+    const localProject = localById.get(remoteProject.id) || localById.get(remoteProject.title)
+    if (!localProject) return remoteProject
+    return {
+      ...remoteProject,
+      storedFiles: mergeRemoteFilesWithLocalFiles(remoteProject.storedFiles, localProject.storedFiles),
+      revisionBeforeFiles: mergeRemoteFilesWithLocalFiles(remoteProject.revisionBeforeFiles, localProject.revisionBeforeFiles),
+    }
+  })
+}
+
 const saveWorkspaceToSupabase = async (state) => {
   if (!supabaseClient) return
   try {
+    const lightweightState = sanitizeWorkspaceForSupabase(state)
     const { error } = await supabaseClient
       .from('reviewboard_workspace_state')
       .upsert({
         id: WORKSPACE_ID,
-        state,
+        state: lightweightState,
         updated_at: new Date().toISOString(),
       })
     if (error) {
@@ -184,8 +242,12 @@ const subscribeWorkspaceRealtime = (onRemoteChange) => {
         const nextState = payload.new?.state
         if (!nextState) return
 
-        applyRemoteWorkspaceState(nextState)
-        onRemoteChange?.(nextState)
+        const mergedState = {
+          ...nextState,
+          [STORAGE_KEYS.projects]: mergeRemoteProjectsWithLocalImages(nextState[STORAGE_KEYS.projects] || []),
+        }
+        applyRemoteWorkspaceState(mergedState)
+        onRemoteChange?.(mergedState)
       }
     )
     .subscribe((status) => {
@@ -457,9 +519,13 @@ function DesignReviewPlatform() {
         }
 
         if (data?.state) {
+          const mergedState = {
+            ...data.state,
+            [STORAGE_KEYS.projects]: mergeRemoteProjectsWithLocalImages(data.state[STORAGE_KEYS.projects] || []),
+          }
           isApplyingRemoteWorkspace = true
-          applyRemoteWorkspaceState(data.state)
-          applySharedStateToScreen(data.state)
+          applyRemoteWorkspaceState(mergedState)
+          applySharedStateToScreen(mergedState)
           window.setTimeout(() => {
             isApplyingRemoteWorkspace = false
             hasLoadedRemoteWorkspace = true
@@ -479,7 +545,11 @@ function DesignReviewPlatform() {
 
     const channel = subscribeWorkspaceRealtime((nextState) => {
       if (!nextState) return
-      applySharedStateToScreen(nextState)
+      const mergedState = {
+        ...nextState,
+        [STORAGE_KEYS.projects]: mergeRemoteProjectsWithLocalImages(nextState[STORAGE_KEYS.projects] || []),
+      }
+      applySharedStateToScreen(mergedState)
     })
 
     return () => {
