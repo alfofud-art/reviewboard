@@ -42,6 +42,7 @@ const STORAGE_KEYS = {
 const SUPABASE_URL = 'https://rkgnimqmpqclsvchxvxb.supabase.co'
 const SUPABASE_ANON_KEY = 'sb_publishable_fpcTK2Mdec35x1WWgAF9Rw_-qDnquql'
 const WORKSPACE_ID = 'design-review-board-main'
+const STORAGE_BUCKET = 'reviewboard-files'
 
 const isSupabaseConfigured = () =>
   SUPABASE_URL.startsWith('https://') &&
@@ -789,20 +790,63 @@ function DesignReviewPlatform() {
     image.src = url
   })
 
+  const uploadFileToSupabaseStorage = async (file, id) => {
+    if (!supabaseClient || !file) return null
+
+    try {
+      const safeName = (file.name || 'file')
+        .replace(/[^a-zA-Z0-9가-힣._-]/g, '_')
+        .slice(0, 120)
+      const path = `${todayString()}/${id}-${safeName}`
+
+      const { error } = await supabaseClient.storage
+        .from(STORAGE_BUCKET)
+        .upload(path, file, {
+          cacheControl: '3600',
+          contentType: file.type || 'application/octet-stream',
+          upsert: false,
+        })
+
+      if (error) {
+        console.warn('Supabase Storage 업로드 실패:', error)
+        return null
+      }
+
+      const { data } = supabaseClient.storage
+        .from(STORAGE_BUCKET)
+        .getPublicUrl(path)
+
+      return {
+        path,
+        url: data?.publicUrl || '',
+      }
+    } catch (error) {
+      console.warn('Supabase Storage 업로드 실패:', error)
+      return null
+    }
+  }
+
   const mapFiles = async (files) => Promise.all(Array.from(files || []).map(async (file) => {
     const isImage = file.type?.startsWith('image/')
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}-${file.name}`
-    const imageUrl = isImage ? await readImageAsDataUrl(file) : null
-    const dbKey = !isImage ? id : null
-    if (!isImage) await saveAttachmentBlob(dbKey, file)
-    const size = await getImageSize(imageUrl)
+
+    const uploaded = await uploadFileToSupabaseStorage(file, id)
+    const fallbackImageUrl = isImage && !uploaded?.url ? await readImageAsDataUrl(file) : null
+    const fileUrl = uploaded?.url || fallbackImageUrl || ''
+    const dbKey = !uploaded?.url ? id : null
+
+    if (!uploaded?.url && !isImage) await saveAttachmentBlob(dbKey, file)
+
+    const size = isImage ? await getImageSize(fileUrl) : null
+
     return {
       id,
       dbKey,
+      storagePath: uploaded?.path || '',
       name: file.name,
       type: file.type || 'application/octet-stream',
       size: file.size || 0,
-      url: imageUrl,
+      url: fileUrl,
       downloadUnavailable: false,
       width: size?.width || null,
       height: size?.height || null,
@@ -1464,6 +1508,20 @@ function DesignReviewPlatform() {
   const downloadAttachment = async (file) => {
     if (!file) return
     const fileName = file.name || 'attachment'
+
+    if (file.url && !file.url.startsWith('data:')) {
+      const link = document.createElement('a')
+      link.href = file.url
+      link.download = fileName
+      link.target = '_blank'
+      link.rel = 'noopener noreferrer'
+      link.style.display = 'none'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      return
+    }
+
     const sourceBlob = file.rawFile instanceof Blob
       ? file.rawFile
       : file.url?.startsWith('data:')
@@ -1484,6 +1542,9 @@ function DesignReviewPlatform() {
   const deleteAttachment = async (targetFile) => {
     if (!canDeleteSelectedProject) return setNotice('삭제 권한이 없습니다. 등록한 본인 카드 또는 관리자만 삭제할 수 있습니다.')
     if (!targetFile) return
+    if (targetFile.storagePath && supabaseClient) {
+      await supabaseClient.storage.from(STORAGE_BUCKET).remove([targetFile.storagePath])
+    }
     await deleteAttachmentBlob(targetFile.dbKey || targetFile.id)
     const nextFiles = uploadedFiles.filter((file) => file.id !== targetFile.id)
     setUploadedFiles(nextFiles)
