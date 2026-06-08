@@ -1191,17 +1191,18 @@ function DesignReviewPlatform() {
   }
 
   const clearProjectSelectionToUploadPreview = () => {
-    setSelectedProjectTitle('')
+    // 외부 클릭은 카드 선택 표시만 해제한다.
+    // 시안 등록 대기 중인 이미지/등록바는 절대 초기화하지 않는다.
     setSelectedCardTitle('')
+
+    if (quickUploadDraftRef.current) return
+
+    setSelectedProjectTitle('')
+    setUploadedFiles([])
+    setCurrentImageIndex(0)
     setActiveTool('')
     setPendingComment(null)
     setActiveAnnotationKey(null)
-
-    // 시안 업로드 후 등록 대기 상태에서는 미리보기 파일/등록바를 유지한다.
-    if (quickUploadDraftRef.current) return
-
-    setUploadedFiles([])
-    setCurrentImageIndex(0)
     setQuickUploadTodayDeadline(false)
     resetView()
   }
