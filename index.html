@@ -1188,13 +1188,16 @@ function DesignReviewPlatform() {
   const clearProjectSelectionToUploadPreview = () => {
     setSelectedProjectTitle('')
     setSelectedCardTitle('')
-    setUploadedFiles([])
-    setCurrentImageIndex(0)
-    setQuickUploadDraft(null)
-    setQuickUploadTodayDeadline(false)
     setActiveTool('')
     setPendingComment(null)
     setActiveAnnotationKey(null)
+
+    // 시안 업로드 후 등록 대기 상태에서는 미리보기 파일/등록바를 유지한다.
+    if (quickUploadDraft) return
+
+    setUploadedFiles([])
+    setCurrentImageIndex(0)
+    setQuickUploadTodayDeadline(false)
     resetView()
   }
 
