@@ -772,7 +772,12 @@ function DesignReviewPlatform() {
 
   useEffect(() => {
     const handleOutsideProjectCardClick = (event) => {
-      if (event.target.closest('[data-project-card="true"]')) return
+      if (
+        event.target.closest('[data-project-card="true"]') ||
+        event.target.closest('[data-keep-project-selection="true"]') ||
+        event.target.closest('button, input, textarea, select, a, label')
+      ) return
+
       clearProjectSelectionToUploadPreview()
     }
 
@@ -1107,18 +1112,24 @@ function DesignReviewPlatform() {
   const getCanvasPoint = (event) => {
     const imageLayer = event.currentTarget.querySelector('[data-image-layer="true"]')
     const rect = imageLayer?.getBoundingClientRect() || event.currentTarget.getBoundingClientRect()
+    const imageWidth = currentFile?.width || ANNOTATION_CANVAS_WIDTH
+    const imageHeight = currentFile?.height || ANNOTATION_CANVAS_HEIGHT
     const ratioX = rect.width ? (event.clientX - rect.left) / rect.width : 0
     const ratioY = rect.height ? (event.clientY - rect.top) / rect.height : 0
     return {
-      x: Math.max(0, Math.min(ANNOTATION_CANVAS_WIDTH, ratioX * ANNOTATION_CANVAS_WIDTH)),
-      y: Math.max(0, Math.min(ANNOTATION_CANVAS_HEIGHT, ratioY * ANNOTATION_CANVAS_HEIGHT)),
+      x: Math.max(0, Math.min(imageWidth, ratioX * imageWidth)),
+      y: Math.max(0, Math.min(imageHeight, ratioY * imageHeight)),
     }
   }
 
-  const getAnnotationPositionStyle = (point) => ({
-    left: `${(point.x / ANNOTATION_CANVAS_WIDTH) * 100}%`,
-    top: `${(point.y / ANNOTATION_CANVAS_HEIGHT) * 100}%`,
-  })
+  const getAnnotationPositionStyle = (point) => {
+    const imageWidth = currentFile?.width || ANNOTATION_CANVAS_WIDTH
+    const imageHeight = currentFile?.height || ANNOTATION_CANVAS_HEIGHT
+    return {
+      left: `${(point.x / imageWidth) * 100}%`,
+      top: `${(point.y / imageHeight) * 100}%`,
+    }
+  }
 
   const getActiveImageDisplaySize = () => {
     const imageWidth = currentFile?.width || ANNOTATION_CANVAS_WIDTH
@@ -1530,9 +1541,19 @@ function DesignReviewPlatform() {
         if (!path.points?.length) return
         const style = getToolStyle(path.tool)
         ctx.beginPath()
+        const sourceWidth = activeCompareSide === 'before'
+          ? currentFile?.beforeFile?.width || currentFile?.width || ANNOTATION_CANVAS_WIDTH
+          : currentFile?.width || ANNOTATION_CANVAS_WIDTH
+        const sourceHeight = activeCompareSide === 'before'
+          ? currentFile?.beforeFile?.height || currentFile?.height || ANNOTATION_CANVAS_HEIGHT
+          : currentFile?.height || ANNOTATION_CANVAS_HEIGHT
+        const scaleX = sourceWidth ? ANNOTATION_CANVAS_WIDTH / sourceWidth : 1
+        const scaleY = sourceHeight ? ANNOTATION_CANVAS_HEIGHT / sourceHeight : 1
         path.points.forEach((point, index) => {
-          if (index === 0) ctx.moveTo(point.x, point.y)
-          else ctx.lineTo(point.x, point.y)
+          const x = point.x * scaleX
+          const y = point.y * scaleY
+          if (index === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
         })
         ctx.strokeStyle = style.stroke
         ctx.lineWidth = style.width
@@ -1543,9 +1564,18 @@ function DesignReviewPlatform() {
         ctx.globalAlpha = 1
       })
 
+      const commentSourceWidth = activeCompareSide === 'before'
+        ? currentFile?.beforeFile?.width || currentFile?.width || ANNOTATION_CANVAS_WIDTH
+        : currentFile?.width || ANNOTATION_CANVAS_WIDTH
+      const commentSourceHeight = activeCompareSide === 'before'
+        ? currentFile?.beforeFile?.height || currentFile?.height || ANNOTATION_CANVAS_HEIGHT
+        : currentFile?.height || ANNOTATION_CANVAS_HEIGHT
+      const commentScaleX = commentSourceWidth ? ANNOTATION_CANVAS_WIDTH / commentSourceWidth : 1
+      const commentScaleY = commentSourceHeight ? ANNOTATION_CANVAS_HEIGHT / commentSourceHeight : 1
+
       currentComments.forEach((comment, index) => {
-        const markerX = Math.max(18, Math.min(comment.x, canvas.width - 18))
-        const markerY = Math.max(18, Math.min(comment.y, canvas.height - 18))
+        const markerX = Math.max(18, Math.min(comment.x * commentScaleX, canvas.width - 18))
+        const markerY = Math.max(18, Math.min(comment.y * commentScaleY, canvas.height - 18))
         const x = Math.max(12, Math.min(markerX + 12, canvas.width - 272))
         const y = Math.max(12, Math.min(markerY + 12, canvas.height - 110))
 
@@ -1797,7 +1827,7 @@ function DesignReviewPlatform() {
             </div>
             <div data-image-layer="true" className="relative z-10 pointer-events-none" style={{ aspectRatio: getActiveImageDisplaySize().aspectRatio, width: getActiveImageDisplaySize().width, maxHeight: getActiveImageDisplaySize().maxHeight, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoomLevel / 100})`, transformOrigin: 'center' }}>
               <img src={activeImageUrl} alt={activeImageName} className="h-full w-full object-contain pointer-events-none" />
-              <svg className="absolute inset-0 h-full w-full pointer-events-none" viewBox={`0 0 ${ANNOTATION_CANVAS_WIDTH} ${ANNOTATION_CANVAS_HEIGHT}`} preserveAspectRatio="none">
+              <svg className="absolute inset-0 h-full w-full pointer-events-none" viewBox={`0 0 ${currentFile?.width || ANNOTATION_CANVAS_WIDTH} ${currentFile?.height || ANNOTATION_CANVAS_HEIGHT}`} preserveAspectRatio="none">
                 {currentDrawings.map((path) => {
                   const style = getToolStyle(path.tool)
                   const d = path.points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
